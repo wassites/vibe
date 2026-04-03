@@ -3,32 +3,47 @@ import { useChat } from '../context/ChatContext';
 import Avatar from './Avatar';
 import { formatTime } from '../lib/utils';
 
+function getPreview(msg, meId) {
+  if (!msg) return 'Nenhuma mensagem ainda';
+  const prefix = msg.sender_id === meId ? 'Você: ' : '';
+
+  if (['image','audio','video'].includes(msg.type))
+    return prefix + `[${msg.type}]`;
+
+  const raw = msg.content ?? '';
+
+  // Formato v2 — tem campo plain com texto original
+  if (raw.startsWith('{"v":2,')) {
+    try {
+      const parsed = JSON.parse(raw);
+      return prefix + (parsed.plain ?? '🔒 Mensagem cifrada');
+    } catch {}
+  }
+
+  // Formato v1 — cifrado puro
+  if (raw.startsWith('{"v":1,')) return prefix + '🔒 Mensagem cifrada';
+
+  return prefix + raw;
+}
+
 export default function ConversationItem({ conversation, isActive, onClick }) {
   const { state, actions } = useChat();
   const { messages, participants, users, me } = state;
   const [menu, setMenu] = useState(null);
   const menuRef = useRef(null);
 
-  const msgs   = messages[conversation.id] ?? [];
-  const last   = msgs[msgs.length - 1];
-  const others = (participants[conversation.id] ?? []).filter(u => u?.id !== me?.id);
-
+  const msgs      = messages[conversation.id] ?? [];
+  const last      = msgs[msgs.length - 1];
+  const others    = (participants[conversation.id] ?? []).filter(u => u?.id !== me?.id);
   const otherUser = conversation.type === 'direct' ? users[others[0]?.id] : null;
 
-  const title = conversation.type === 'group'
+  const title     = conversation.type === 'group'
     ? conversation.name
     : otherUser?.name ?? others[0]?.name ?? 'Conversa';
 
   const avatarUrl = conversation.type === 'direct' ? otherUser?.avatar_url ?? null : null;
-
-  const isOnline = conversation.type === 'direct'
-    ? otherUser?.status === 'online'
-    : false;
-
-  const preview = last
-    ? (last.sender_id === me?.id ? 'Você: ' : '') +
-      (['image','audio','video'].includes(last.type) ? `[${last.type}]` : last.content)
-    : 'Nenhuma mensagem ainda';
+  const isOnline  = conversation.type === 'direct' ? otherUser?.status === 'online' : false;
+  const preview   = getPreview(last, me?.id);
 
   useEffect(() => {
     if (!menu) return;
@@ -39,27 +54,11 @@ export default function ConversationItem({ conversation, isActive, onClick }) {
     return () => document.removeEventListener('mousedown', handle);
   }, [menu]);
 
-  function handleContextMenu(e) {
-    e.preventDefault();
-    setMenu({ x: e.clientX, y: e.clientY });
-  }
-
-  function handleDeleteMe() {
-    actions.deleteConversation(conversation.id, false);
-    setMenu(null);
-  }
-
-  function handleDeleteAll() {
-    if (!confirm('Apagar conversa para todos? Esta ação não pode ser desfeita.')) return;
-    actions.deleteConversation(conversation.id, true);
-    setMenu(null);
-  }
-
   return (
     <>
       <button
         onClick={onClick}
-        onContextMenu={handleContextMenu}
+        onContextMenu={e => { e.preventDefault(); setMenu({ x: e.clientX, y: e.clientY }); }}
         className={`w-full flex items-center gap-3 px-4 py-3 text-left transition-colors duration-100
                     ${isActive
                       ? 'bg-vibe-hover border-l-2 border-vibe-accent'
@@ -82,13 +81,11 @@ export default function ConversationItem({ conversation, isActive, onClick }) {
       </button>
 
       {menu && (
-        <div
-          ref={menuRef}
-          className="fixed z-50 bg-white rounded-xl shadow-lg border border-gray-100 py-1 min-w-44"
-          style={{ top: menu.y, left: menu.x }}
-        >
+        <div ref={menuRef}
+             className="fixed z-50 bg-white rounded-xl shadow-lg border border-gray-100 py-1 min-w-44"
+             style={{ top: menu.y, left: menu.x }}>
           <button
-            onClick={handleDeleteMe}
+            onClick={() => { actions.deleteConversation(conversation.id, false); setMenu(null); }}
             className="w-full flex items-center gap-2 px-4 py-2 text-sm text-gray-700
                        hover:bg-gray-50 transition-colors text-left"
           >
@@ -97,9 +94,12 @@ export default function ConversationItem({ conversation, isActive, onClick }) {
             </svg>
             Apagar para mim
           </button>
-
           <button
-            onClick={handleDeleteAll}
+            onClick={() => {
+              if (!confirm('Apagar conversa para todos?')) return;
+              actions.deleteConversation(conversation.id, true);
+              setMenu(null);
+            }}
             className="w-full flex items-center gap-2 px-4 py-2 text-sm text-red-500
                        hover:bg-red-50 transition-colors text-left"
           >

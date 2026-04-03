@@ -20,18 +20,20 @@ const query = (sql, params) => pool.query(sql, params);
 async function createSchema() {
   await query(`
     CREATE TABLE IF NOT EXISTS users (
-      id            TEXT PRIMARY KEY,
-      name          TEXT NOT NULL,
-      email         TEXT UNIQUE,
-      password_hash TEXT,
-      avatar_url    TEXT,
-      bio           TEXT,
-      phone         TEXT UNIQUE,
-      provider      TEXT NOT NULL DEFAULT 'local',
-      provider_id   TEXT,
-      status        TEXT NOT NULL DEFAULT 'offline',
-      last_seen     TIMESTAMPTZ,
-      created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      id                  TEXT PRIMARY KEY,
+      name                TEXT NOT NULL,
+      email               TEXT UNIQUE,
+      password_hash       TEXT,
+      avatar_url          TEXT,
+      bio                 TEXT,
+      phone               TEXT UNIQUE,
+      provider            TEXT NOT NULL DEFAULT 'local',
+      provider_id         TEXT,
+      status              TEXT NOT NULL DEFAULT 'offline',
+      last_seen           TIMESTAMPTZ,
+      created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      public_key          TEXT,
+      private_key_escrow  TEXT
     );
 
     CREATE TABLE IF NOT EXISTS contacts (
@@ -76,7 +78,6 @@ async function createSchema() {
       expires_at TIMESTAMPTZ NOT NULL
     );
 
-    -- Mensagens deletadas só para um usuário
     CREATE TABLE IF NOT EXISTS message_deletes (
       message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
       user_id    TEXT NOT NULL REFERENCES users(id)    ON DELETE CASCADE,
@@ -84,7 +85,6 @@ async function createSchema() {
       PRIMARY KEY (message_id, user_id)
     );
 
-    -- Conversas escondidas só para um usuário
     CREATE TABLE IF NOT EXISTS conversation_hides (
       conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
       user_id         TEXT NOT NULL REFERENCES users(id)         ON DELETE CASCADE,
@@ -92,15 +92,19 @@ async function createSchema() {
       PRIMARY KEY (conversation_id, user_id)
     );
 
-    CREATE INDEX IF NOT EXISTS idx_messages_conv      ON messages(conversation_id, created_at);
-    CREATE INDEX IF NOT EXISTS idx_queue_user         ON offline_queue(user_id);
-    CREATE INDEX IF NOT EXISTS idx_participants_user  ON participants(user_id);
-    CREATE INDEX IF NOT EXISTS idx_contacts_owner     ON contacts(owner_id);
-    CREATE INDEX IF NOT EXISTS idx_users_email        ON users(email);
-    CREATE INDEX IF NOT EXISTS idx_users_phone        ON users(phone);
-    CREATE INDEX IF NOT EXISTS idx_users_provider     ON users(provider, provider_id);
-    CREATE INDEX IF NOT EXISTS idx_msg_deletes_user   ON message_deletes(user_id);
-    CREATE INDEX IF NOT EXISTS idx_conv_hides_user    ON conversation_hides(user_id);
+    -- Adiciona colunas de criptografia se ainda não existirem
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS public_key         TEXT;
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS private_key_escrow TEXT;
+
+    CREATE INDEX IF NOT EXISTS idx_messages_conv     ON messages(conversation_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_queue_user        ON offline_queue(user_id);
+    CREATE INDEX IF NOT EXISTS idx_participants_user ON participants(user_id);
+    CREATE INDEX IF NOT EXISTS idx_contacts_owner    ON contacts(owner_id);
+    CREATE INDEX IF NOT EXISTS idx_users_email       ON users(email);
+    CREATE INDEX IF NOT EXISTS idx_users_phone       ON users(phone);
+    CREATE INDEX IF NOT EXISTS idx_users_provider    ON users(provider, provider_id);
+    CREATE INDEX IF NOT EXISTS idx_msg_deletes_user  ON message_deletes(user_id);
+    CREATE INDEX IF NOT EXISTS idx_conv_hides_user   ON conversation_hides(user_id);
   `);
   console.log('[DB] schema ok');
 }
@@ -170,6 +174,22 @@ const db = {
       return res.rows[0] ?? null;
     },
 
+    async saveKeys(userId, publicKey, privateKeyEscrow) {
+      await query(`
+        UPDATE users SET public_key = $2, private_key_escrow = $3 WHERE id = $1
+      `, [userId, publicKey, privateKeyEscrow]);
+    },
+
+    async getPublicKey(userId) {
+      const res = await query('SELECT public_key FROM users WHERE id = $1', [userId]);
+      return res.rows[0]?.public_key ?? null;
+    },
+
+    async getEscrow(userId) {
+      const res = await query('SELECT private_key_escrow FROM users WHERE id = $1', [userId]);
+      return res.rows[0]?.private_key_escrow ?? null;
+    },
+
     async list() {
       const res = await query('SELECT * FROM users ORDER BY name');
       return res.rows;
@@ -195,7 +215,8 @@ const db = {
 
     async list(ownerId) {
       const res = await query(`
-        SELECT u.id, u.name, u.avatar_url, u.status, u.last_seen, c.nickname, c.added_at
+        SELECT u.id, u.name, u.avatar_url, u.status, u.last_seen,
+               u.public_key, c.nickname, c.added_at
         FROM contacts c
         JOIN users u ON u.id = c.contact_id
         WHERE c.owner_id = $1
@@ -257,7 +278,6 @@ const db = {
       return res.rowCount > 0;
     },
 
-    // Esconde conversa só para este usuário
     async hideForUser(convId, userId) {
       await query(`
         INSERT INTO conversation_hides (conversation_id, user_id)
@@ -265,7 +285,6 @@ const db = {
       `, [convId, userId]);
     },
 
-    // Deleta conversa para todos — remove participantes e mensagens em cascata
     async deleteForAll(convId) {
       await query('DELETE FROM conversations WHERE id = $1', [convId]);
     },
@@ -317,7 +336,6 @@ const db = {
       return res.rows[0] ?? null;
     },
 
-    // Histórico excluindo mensagens deletadas para este usuário
     async history(convId, limit = 50, userId = null) {
       const res = userId
         ? await query(`
@@ -351,7 +369,6 @@ const db = {
       `, [convId, byUserId]);
     },
 
-    // Deleta mensagem só para um usuário
     async deleteForUser(messageId, userId) {
       await query(`
         INSERT INTO message_deletes (message_id, user_id)
@@ -359,7 +376,6 @@ const db = {
       `, [messageId, userId]);
     },
 
-    // Deleta mensagem para todos
     async deleteForAll(messageId) {
       await query('DELETE FROM messages WHERE id = $1', [messageId]);
     },

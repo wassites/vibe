@@ -2,49 +2,84 @@ import React, { createContext, useContext, useReducer, useCallback } from 'react
 import { useSocket } from '../hooks/useSocket';
 
 const initial = {
-  connected:        false,
-  me:               null,
-  conversations:    [],
-  activeConvId:     null,
-  messages:         {},
-  participants:     {},
-  users:            {},
-  typing:           {},
-  contacts:         [],
-  contactSuggestion: null, // { user, conversationId, message }
+  connected:          false,
+  me:                 null,
+  conversations:      [],
+  activeConvId:       null,
+  messages:           {},
+  participants:       {},
+  users:              {},
+  typing:             {},
+  contacts:           [],
+  contactSuggestion:  null,
+  duplicateSession:   null,
+  syncRequest:        null,
+  syncCode:           null,
+  syncSendTo:         null,
 };
 
 function reducer(state, action) {
   switch (action.type) {
 
     case 'CONNECTED':    return { ...state, connected: true };
-    case 'DISCONNECTED': return { ...state, connected: false };
+    case 'DISCONNECTED': return { ...state, connected: false, me: null };
 
     case 'AUTHENTICATED': {
       const users = { ...state.users };
       if (action.user) users[action.user.id] = action.user;
       action.contacts?.forEach(c => { users[c.id] = c; });
-      // Carrega usuários das conversas vindos do servidor
-      if (action.usersMap) {
-        Object.values(action.usersMap).forEach(u => { if (u) users[u.id] = u; });
-      }
+      if (action.usersMap) Object.values(action.usersMap).forEach(u => { if (u) users[u.id] = u; });
       return {
         ...state,
-        me:            action.user,
-        conversations: action.conversations   ?? [],
-        contacts:      action.contacts        ?? [],
-        participants:  action.participantsMap ?? {},
+        me:               action.user,
+        conversations:    action.conversations   ?? [],
+        contacts:         action.contacts        ?? [],
+        participants:     action.participantsMap ?? {},
         users,
+        duplicateSession: null,
+        syncRequest:      null,
+        syncCode:         null,
+        syncSendTo:       null,
       };
     }
+
+    case 'DUPLICATE_SESSION':
+      return {
+        ...state,
+        me:               action.user,
+        conversations:    action.conversations   ?? [],
+        contacts:         action.contacts        ?? [],
+        participants:     action.participantsMap ?? {},
+        duplicateSession: { sessionId: action.sessionId },
+        users: (() => {
+          const users = { ...state.users };
+          if (action.user) users[action.user.id] = action.user;
+          action.contacts?.forEach(c => { users[c.id] = c; });
+          if (action.usersMap) Object.values(action.usersMap).forEach(u => { if (u) users[u.id] = u; });
+          return users;
+        })(),
+      };
+
+    case 'NEW_SESSION_DETECTED':
+      return { ...state, syncRequest: { sessionId: action.sessionId } };
+
+    case 'SYNC_CODE_GENERATED':
+      return { ...state, syncCode: action.code };
+
+    case 'SYNC_SEND_KEYS':
+      return { ...state, syncSendTo: action.targetSessionId };
+
+    case 'SYNC_COMPLETE':
+      return { ...state, duplicateSession: null, syncRequest: null, syncCode: null, syncSendTo: null };
+
+    case 'DISMISS_SYNC':
+      return { ...state, duplicateSession: null, syncRequest: null, syncCode: null, syncSendTo: null };
 
     case 'CONVERSATION_READY': {
       const messages     = { ...state.messages,    [action.conversation.id]: action.history      ?? [] };
       const participants = { ...state.participants, [action.conversation.id]: action.participants ?? [] };
       const users        = { ...state.users };
       action.participants?.forEach(u => { if (u) users[u.id] = u; });
-
-      // Sempre substitui a conversa com dados completos
       const filtered = state.conversations.filter(c => c.id !== action.conversation.id);
       return {
         ...state,
@@ -63,8 +98,7 @@ function reducer(state, action) {
         ...state,
         conversations: exists ? state.conversations : [action.conversation, ...state.conversations],
         messages:      { ...state.messages, [action.conversation.id]: [] },
-        participants,
-        users,
+        participants, users,
       };
     }
 
@@ -77,20 +111,13 @@ function reducer(state, action) {
       const conversations = convExists
         ? state.conversations
         : [{ id: m.conversation_id, type: 'direct', name: null, created_at: m.created_at }, ...state.conversations];
-      return {
-        ...state,
-        conversations,
-        messages: { ...state.messages, [m.conversation_id]: [...prev, m] },
-      };
+      return { ...state, conversations, messages: { ...state.messages, [m.conversation_id]: [...prev, m] } };
     }
 
     case 'MESSAGE_DELETED': {
       const { messageId, conversationId } = action;
       const prev = state.messages[conversationId] ?? [];
-      return {
-        ...state,
-        messages: { ...state.messages, [conversationId]: prev.filter(m => m.id !== messageId) },
-      };
+      return { ...state, messages: { ...state.messages, [conversationId]: prev.filter(m => m.id !== messageId) } };
     }
 
     case 'CONVERSATION_DELETED': {
@@ -103,8 +130,7 @@ function reducer(state, action) {
         ...state,
         conversations: state.conversations.filter(c => c.id !== conversationId),
         activeConvId:  state.activeConvId === conversationId ? null : state.activeConvId,
-        messages,
-        participants,
+        messages, participants,
       };
     }
 
@@ -133,12 +159,7 @@ function reducer(state, action) {
       }
       const contacts = state.contacts.map(c =>
         c.id === action.userId
-          ? {
-              ...c,
-              status: action.status,
-              ...(action.name      ? { name:       action.name }      : {}),
-              ...(action.avatarUrl ? { avatar_url: action.avatarUrl } : {}),
-            }
+          ? { ...c, status: action.status, ...(action.name ? { name: action.name } : {}), ...(action.avatarUrl ? { avatar_url: action.avatarUrl } : {}) }
           : c
       );
       return { ...state, users, contacts };
@@ -158,10 +179,8 @@ function reducer(state, action) {
       return { ...state, contacts, users };
     }
 
-    case 'CONTACT_REMOVED': {
-      const contacts = state.contacts.filter(c => c.id !== action.contactId);
-      return { ...state, contacts };
-    }
+    case 'CONTACT_REMOVED':
+      return { ...state, contacts: state.contacts.filter(c => c.id !== action.contactId) };
 
     case 'CONTACTS': {
       const users = { ...state.users };
@@ -189,14 +208,32 @@ export function ChatProvider({ children }) {
   const handleMessage = useCallback((data) => {
     switch (data.event) {
       case 'authenticated':
-        dispatch({
-          type:            'AUTHENTICATED',
-          user:            data.user,
-          conversations:   data.conversations,
-          contacts:        data.contacts,
-          participantsMap: data.participantsMap,
-          usersMap:        data.usersMap,
-        });
+        dispatch({ type: 'AUTHENTICATED', user: data.user, conversations: data.conversations, contacts: data.contacts, participantsMap: data.participantsMap, usersMap: data.usersMap });
+        break;
+      case 'duplicate_session':
+        dispatch({ type: 'DUPLICATE_SESSION', user: data.user, conversations: data.conversations, contacts: data.contacts, participantsMap: data.participantsMap, usersMap: data.usersMap, sessionId: data.sessionId });
+        break;
+      case 'new_session_detected':
+        dispatch({ type: 'NEW_SESSION_DETECTED', sessionId: data.sessionId });
+        break;
+      case 'sync_code_generated':
+        dispatch({ type: 'SYNC_CODE_GENERATED', code: data.code });
+        break;
+      case 'sync_send_keys':
+        dispatch({ type: 'SYNC_SEND_KEYS', targetSessionId: data.targetSessionId });
+        break;
+      case 'sync_result':
+        if (!data.ok) console.error('[SYNC] erro:', data.error);
+        break;
+      case 'sync_complete':
+        dispatch({ type: 'SYNC_COMPLETE' });
+        break;
+      case 'sync_data':
+        if (data.privateKey) {
+          const userId = localStorage.getItem('vibe_userId');
+          if (userId) localStorage.setItem(`vibe_privkey_${userId}`, data.privateKey);
+        }
+        dispatch({ type: 'SYNC_COMPLETE' });
         break;
       case 'conversation_ready':
         dispatch({ type: 'CONVERSATION_READY', ...data });
@@ -205,7 +242,7 @@ export function ChatProvider({ children }) {
         dispatch({ type: 'GROUP_CREATED', conversation: data.conversation, participants: data.participants });
         break;
       case 'new_message':
-        dispatch({ type: 'NEW_MESSAGE', message: data.message });
+        dispatch({ type: 'NEW_MESSAGE',  message: data.message });
         break;
       case 'message_sent':
         dispatch({ type: 'MESSAGE_SENT', message: data.message });
@@ -256,7 +293,7 @@ export function ChatProvider({ children }) {
   });
 
   const actions = {
-    auth:               (userId, name, avatarUrl)             => send('auth',                { userId, name, avatarUrl }),
+    auth:               (userId, name, avatarUrl)             => { localStorage.setItem('vibe_userId', userId); send('auth', { userId, name, avatarUrl }); },
     addContact:         (contactId, nickname)                  => send('add_contact',         { contactId, nickname }),
     addContactByName:   (name, nickname)                       => send('add_contact_by_name', { name, nickname }),
     removeContact:      (contactId)                            => send('remove_contact',      { contactId }),
@@ -269,6 +306,10 @@ export function ChatProvider({ children }) {
     deleteMessage:      (messageId, forEveryone=false)         => send('delete_message',      { messageId, forEveryone }),
     deleteConversation: (conversationId, forEveryone=false)    => send('delete_conversation', { conversationId, forEveryone }),
     dismissSuggestion:  ()                                     => dispatch({ type: 'DISMISS_SUGGESTION' }),
+    syncAuthorize:      (targetSessionId)                      => send('sync_authorize',      { targetSessionId }),
+    syncConfirm:        (code)                                 => send('sync_confirm',        { code }),
+    syncTransfer:       (targetSessionId, privateKey)          => send('sync_transfer',       { targetSessionId, privateKey, conversationHistory: {} }),
+    dismissSync:        ()                                     => dispatch({ type: 'DISMISS_SYNC' }),
     setActive:          (convId)                               => dispatch({ type: 'SET_ACTIVE', convId }),
   };
 

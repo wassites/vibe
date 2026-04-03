@@ -1,7 +1,12 @@
 'use strict';
 const WebSocket = require('ws');
 const db = require('../db/db_index');
-const { socketMap, deliver, deliverToConversation } = require('../middleware/socketMap');
+const {
+  socketMap, syncCodes,
+  addSocket, removeSocket, countSockets,
+  socketSend, socketSendTo,
+  deliver, deliverToConversation,
+} = require('../middleware/socketMap');
 
 const e = (ws, msg) => ws.send(JSON.stringify({ event: 'error', message: msg }));
 
@@ -12,12 +17,14 @@ module.exports = {
     if (!userId?.trim() || !name?.trim()) return e(ws, 'userId e name são obrigatórios');
 
     const exists = await db.users.exists(userId.trim());
-    if (!exists) {
-      await db.users.create(userId.trim(), name.trim(), { avatarUrl });
-    }
+    if (!exists) await db.users.create(userId.trim(), name.trim(), { avatarUrl });
 
-    socketMap.set(userId, ws);
-    ws._userId = userId;
+    const sessionCount = countSockets(userId);
+
+    // Registra o novo socket
+    addSocket(userId, ws);
+    ws._userId    = userId;
+    ws._sessionId = `${userId}_${Date.now()}`;
     await db.users.setStatus(userId, 'online');
 
     const [user, conversations, contacts] = await Promise.all([
@@ -26,7 +33,7 @@ module.exports = {
       db.contacts.list(userId),
     ]);
 
-    // Carrega participantes e usuários de todas as conversas de uma vez
+    // Carrega participantes de todas as conversas
     const participantsMap = {};
     const usersMap        = {};
     for (const conv of conversations) {
@@ -36,21 +43,115 @@ module.exports = {
       members.forEach(u => { if (u) usersMap[u.id] = u; });
     }
 
-    ws.send(JSON.stringify({
-      event: 'authenticated',
-      user, conversations, contacts,
-      participantsMap,
-      usersMap,
-    }));
+    if (sessionCount > 0) {
+      // Já existe outra sessão ativa — notifica esta aba que há duplicata
+      ws.send(JSON.stringify({
+        event:        'duplicate_session',
+        user,
+        conversations,
+        contacts,
+        participantsMap,
+        usersMap,
+        sessionId:    ws._sessionId,
+      }));
 
-    const pending = await db.offlineQueue.flush(userId);
-    if (pending.length > 0)
-      ws.send(JSON.stringify({ event: 'offline_queue', count: pending.length, messages: pending }));
+      // Notifica as outras abas que uma nova sessão tentou conectar
+      const sockets = socketMap.get(userId) ?? new Set();
+      for (const other of sockets) {
+        if (other !== ws && other?.readyState === WebSocket.OPEN) {
+          other.send(JSON.stringify({
+            event:     'new_session_detected',
+            sessionId: ws._sessionId,
+          }));
+        }
+      }
 
-    for (const contact of contacts)
-      deliver(contact.id, 'presence', { userId, name, status: 'online' });
+      console.log(`[AUTH] ${name} (${userId}) abriu nova sessão (total: ${sessionCount + 1})`);
+    } else {
+      // Primeira sessão — fluxo normal
+      ws.send(JSON.stringify({
+        event: 'authenticated',
+        user, conversations, contacts,
+        participantsMap, usersMap,
+      }));
 
-    console.log(`[AUTH] ${name} (${userId}) online`);
+      const pending = await db.offlineQueue.flush(userId);
+      if (pending.length > 0)
+        ws.send(JSON.stringify({ event: 'offline_queue', count: pending.length, messages: pending }));
+
+      for (const contact of contacts)
+        deliver(contact.id, 'presence', { userId, name, status: 'online' });
+
+      console.log(`[AUTH] ${name} (${userId}) online`);
+    }
+  },
+
+  // Aba A autoriza sincronização — gera código de 6 dígitos
+  async sync_authorize({ ws, userId, payload }) {
+    const { targetSessionId } = payload;
+    if (!targetSessionId) return e(ws, 'targetSessionId obrigatório');
+
+    const code      = Math.floor(100000 + Math.random() * 900000).toString();
+    const expiresAt = Date.now() + 5 * 60 * 1000; // 5 minutos
+
+    syncCodes.set(code, { fromWs: ws, userId, targetSessionId, code, expiresAt });
+
+    // Limpa código expirado automaticamente
+    setTimeout(() => syncCodes.delete(code), 5 * 60 * 1000);
+
+    // Envia código para a aba A mostrar ao usuário
+    ws.send(JSON.stringify({ event: 'sync_code_generated', code, expiresIn: 300 }));
+    console.log(`[SYNC] código gerado para ${userId}: ${code}`);
+  },
+
+  // Aba B envia o código recebido do usuário
+  async sync_confirm({ ws, userId, payload }) {
+    const { code } = payload;
+    if (!code) return e(ws, 'Código obrigatório');
+
+    const entry = syncCodes.get(code);
+
+    if (!entry) return ws.send(JSON.stringify({ event: 'sync_result', ok: false, error: 'Código inválido ou expirado' }));
+    if (Date.now() > entry.expiresAt) {
+      syncCodes.delete(code);
+      return ws.send(JSON.stringify({ event: 'sync_result', ok: false, error: 'Código expirado' }));
+    }
+    if (entry.userId !== userId) return ws.send(JSON.stringify({ event: 'sync_result', ok: false, error: 'Código não pertence a este usuário' }));
+
+    syncCodes.delete(code);
+
+    // Pede para aba A enviar a chave privada e histórico
+    if (entry.fromWs?.readyState === WebSocket.OPEN) {
+      entry.fromWs.send(JSON.stringify({
+        event:           'sync_send_keys',
+        targetSessionId: entry.targetSessionId,
+      }));
+    }
+
+    ws.send(JSON.stringify({ event: 'sync_result', ok: true }));
+    console.log(`[SYNC] sincronização autorizada para ${userId}`);
+  },
+
+  // Aba A envia chave privada + histórico para aba B
+  async sync_transfer({ ws, userId, payload }) {
+    const { targetSessionId, privateKey, conversationHistory } = payload;
+
+    // Encontra o socket da aba B pelo sessionId
+    const sockets = socketMap.get(userId) ?? new Set();
+    for (const targetWs of sockets) {
+      if (targetWs._sessionId === targetSessionId && targetWs?.readyState === WebSocket.OPEN) {
+        targetWs.send(JSON.stringify({
+          event:               'sync_data',
+          privateKey,
+          conversationHistory,
+        }));
+
+        // Marca a aba B como autenticada
+        targetWs.send(JSON.stringify({ event: 'sync_complete' }));
+        console.log(`[SYNC] dados transferidos para sessão ${targetSessionId}`);
+        break;
+      }
+    }
   },
 
   async add_contact({ ws, userId, payload }) {
@@ -90,7 +191,6 @@ module.exports = {
     if (!contactId) return e(ws, 'contactId é obrigatório');
     await db.contacts.remove(userId, contactId);
     ws.send(JSON.stringify({ event: 'contact_removed', contactId }));
-    console.log(`[CONTACT] ${userId} removeu ${contactId}`);
   },
 
   async get_contacts({ ws, userId }) {
@@ -108,7 +208,6 @@ module.exports = {
       conv = await db.conversations.create('direct');
       await db.participants.add(conv.id, userId);
       await db.participants.add(conv.id, targetUserId);
-      console.log(`[CONV] nova conversa direta: ${userId} ↔ ${targetUserId}`);
     }
 
     const [history, memberIds] = await Promise.all([
@@ -130,55 +229,51 @@ module.exports = {
 
     const memberIds = await db.participants.list(conversationId);
     const others    = memberIds.filter(u => u !== userId);
-    const anyOnline = others.some(u => socketMap.get(u)?.readyState === WebSocket.OPEN);
+    const anyOnline = others.some(u => (socketMap.get(u)?.size ?? 0) > 0);
 
     if (anyOnline) {
       await db.messages.updateStatus(msg.id, 'delivered');
       msg.status = 'delivered';
     }
 
-    // Entrega a mensagem e junto verifica se o destinatário tem o remetente nos contatos
-    // Se não tiver, sugere adicionar
     for (const otherId of others) {
       const hasContact = await db.contacts.exists(otherId, userId);
       const sender     = await db.users.findById(userId);
-
       deliver(otherId, 'new_message', { message: msg });
-
       if (!hasContact && sender) {
         deliver(otherId, 'contact_suggestion', {
-          user: sender,
-          conversationId,
+          user: sender, conversationId,
           message: `${sender.name} te mandou uma mensagem. Deseja adicionar aos contatos?`,
         });
       }
     }
 
+    // Entrega para outras sessões do próprio remetente
+    const myOtherSockets = socketMap.get(userId) ?? new Set();
+    for (const other of myOtherSockets) {
+      if (other !== ws && other?.readyState === WebSocket.OPEN) {
+        other.send(JSON.stringify({ event: 'message_sent', message: msg }));
+      }
+    }
+
     ws.send(JSON.stringify({ event: 'message_sent', message: msg }));
-    console.log(`[MSG] ${conversationId} ← ${userId}: "${content.slice(0, 40)}"`);
   },
 
   async delete_message({ ws, userId, payload }) {
     const { messageId, forEveryone = false } = payload;
     if (!messageId) return e(ws, 'messageId é obrigatório');
-
     const msg = await db.messages.findById(messageId);
     if (!msg) return e(ws, 'Mensagem não encontrada');
 
     if (forEveryone) {
-      if (msg.sender_id !== userId) return e(ws, 'Você só pode apagar suas próprias mensagens para todos');
+      if (msg.sender_id !== userId) return e(ws, 'Só pode apagar suas próprias mensagens para todos');
       await db.messages.deleteForAll(messageId);
       await deliverToConversation(msg.conversation_id, 'message_deleted', {
         messageId, conversationId: msg.conversation_id, forEveryone: true,
       }, null);
-      console.log(`[DELETE] msg ${messageId} apagada para todos por ${userId}`);
     } else {
       await db.messages.deleteForUser(messageId, userId);
-      ws.send(JSON.stringify({
-        event: 'message_deleted', messageId,
-        conversationId: msg.conversation_id, forEveryone: false,
-      }));
-      console.log(`[DELETE] msg ${messageId} apagada para ${userId}`);
+      ws.send(JSON.stringify({ event: 'message_deleted', messageId, conversationId: msg.conversation_id, forEveryone: false }));
     }
   },
 
@@ -192,11 +287,9 @@ module.exports = {
       await db.conversations.deleteForAll(conversationId);
       for (const uid of memberIds)
         deliver(uid, 'conversation_deleted', { conversationId, forEveryone: true });
-      console.log(`[DELETE] conversa ${conversationId} apagada para todos por ${userId}`);
     } else {
       await db.conversations.hideForUser(conversationId, userId);
       ws.send(JSON.stringify({ event: 'conversation_deleted', conversationId, forEveryone: false }));
-      console.log(`[DELETE] conversa ${conversationId} escondida para ${userId}`);
     }
   },
 
@@ -215,23 +308,19 @@ module.exports = {
 
     for (const u of members)
       deliver(u, 'group_created', { conversation: conv, participants, createdBy: userId });
-
-    console.log(`[GROUP] "${name}" criado por ${userId}`);
   },
 
   async message_read({ ws, userId, payload }) {
     const { conversationId } = payload;
     if (!await db.participants.isMember(conversationId, userId)) return;
     await db.messages.markConversationRead(conversationId, userId);
-    await deliverToConversation(conversationId, 'messages_read',
-      { conversationId, byUserId: userId }, userId);
+    await deliverToConversation(conversationId, 'messages_read', { conversationId, byUserId: userId }, userId);
   },
 
   async typing({ ws, userId, payload }) {
     const { conversationId, isTyping } = payload;
     if (!await db.participants.isMember(conversationId, userId)) return;
-    await deliverToConversation(conversationId, 'typing',
-      { conversationId, userId, isTyping: !!isTyping }, userId);
+    await deliverToConversation(conversationId, 'typing', { conversationId, userId, isTyping: !!isTyping }, userId);
   },
 
   async get_history({ ws, userId, payload }) {

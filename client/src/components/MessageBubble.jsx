@@ -1,5 +1,6 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useChat } from '../context/ChatContext';
+import { useCrypto } from '../hooks/useCrypto';
 import { formatTime } from '../lib/utils';
 
 function StatusIcon({ status }) {
@@ -26,13 +27,63 @@ function StatusIcon({ status }) {
   );
 }
 
+function parseContent(raw) {
+  if (!raw) return { type: 'plain', text: raw };
+  if (raw.startsWith('{"v":2,')) {
+    try { return { type: 'v2', ...JSON.parse(raw) }; } catch {}
+  }
+  if (raw.startsWith('{"v":1,')) {
+    try { return { type: 'v1', ...JSON.parse(raw) }; } catch {}
+  }
+  return { type: 'plain', text: raw };
+}
+
 export default function MessageBubble({ message, isOwn }) {
-  const { actions } = useChat();
-  const [menu, setMenu] = useState(null); // { x, y }
+  const { state, actions } = useChat();
+  const { decrypt } = useCrypto();
+  const { me } = state;
+
+  const [displayContent, setDisplayContent] = useState(null);
+  const [decrypting, setDecrypting]         = useState(false);
+  const [menu, setMenu]                     = useState(null);
   const menuRef = useRef(null);
+
   const isMedia = ['image', 'audio', 'video'].includes(message.type);
 
-  // Fecha menu ao clicar fora
+  useEffect(() => {
+    if (isMedia) { setDisplayContent(message.content); return; }
+
+    const parsed = parseContent(message.content);
+
+    if (parsed.type === 'plain') {
+      setDisplayContent(parsed.text);
+      return;
+    }
+
+    if (parsed.type === 'v2') {
+      if (isOwn) {
+        // Remetente usa o campo plain diretamente — sem precisar decifrar
+        setDisplayContent(parsed.plain ?? '🔒');
+      } else {
+        // Destinatário decifra o campo encrypted com sua chave privada
+        setDecrypting(true);
+        decrypt(parsed.encrypted, me?.id).then(result => {
+          setDisplayContent(result ?? '🔒 Não foi possível decifrar');
+          setDecrypting(false);
+        });
+      }
+      return;
+    }
+
+    if (parsed.type === 'v1') {
+      setDecrypting(true);
+      decrypt(message.content, me?.id).then(result => {
+        setDisplayContent(result ?? '🔒 Não foi possível decifrar');
+        setDecrypting(false);
+      });
+    }
+  }, [message.content, me?.id, isOwn]);
+
   useEffect(() => {
     if (!menu) return;
     function handle(e) {
@@ -42,26 +93,20 @@ export default function MessageBubble({ message, isOwn }) {
     return () => document.removeEventListener('mousedown', handle);
   }, [menu]);
 
-  function handleContextMenu(e) {
-    e.preventDefault();
-    setMenu({ x: e.clientX, y: e.clientY });
-  }
-
-  function handleDeleteMe() {
-    actions.deleteMessage(message.id, false);
-    setMenu(null);
-  }
-
-  function handleDeleteAll() {
-    actions.deleteMessage(message.id, true);
-    setMenu(null);
-  }
+  // Preview para ConversationItem — exporta texto legível
+  const previewText = (() => {
+    const parsed = parseContent(message.content);
+    if (parsed.type === 'v2') return parsed.plain ?? '🔒 Mensagem cifrada';
+    if (parsed.type === 'v1') return '🔒 Mensagem cifrada';
+    return message.content;
+  })();
 
   return (
     <>
       <div
         className={`flex w-full mb-1 ${isOwn ? 'justify-end' : 'justify-start'}`}
-        onContextMenu={handleContextMenu}
+        onContextMenu={e => { e.preventDefault(); setMenu({ x: e.clientX, y: e.clientY }); }}
+        data-preview={previewText}
       >
         <div
           style={{
@@ -74,20 +119,15 @@ export default function MessageBubble({ message, isOwn }) {
           className="relative max-w-[70%] px-3 py-2 text-sm"
         >
           {message.type === 'image' && (
-            <img
-              src={message.content}
-              alt="imagem"
-              className="rounded-xl max-w-full max-h-60 object-cover mb-1 cursor-pointer"
-              onClick={() => window.open(message.content, '_blank')}
-            />
+            <img src={message.content} alt="imagem"
+                 className="rounded-xl max-w-full max-h-60 object-cover mb-1 cursor-pointer"
+                 onClick={() => window.open(message.content, '_blank')} />
           )}
-
           {message.type === 'audio' && (
             <audio controls className="w-full mb-1" style={{ minWidth: '220px' }}>
               <source src={message.content} />
             </audio>
           )}
-
           {message.type === 'video' && (
             <video controls className="rounded-xl max-w-full max-h-60 mb-1">
               <source src={message.content} />
@@ -96,7 +136,10 @@ export default function MessageBubble({ message, isOwn }) {
 
           {!isMedia && (
             <p className="leading-relaxed break-words whitespace-pre-wrap" style={{ color: '#111827' }}>
-              {message.content}
+              {decrypting
+                ? <span style={{ color: '#8696a0', fontSize: '12px' }}>🔐 decifrando...</span>
+                : (displayContent ?? message.content)
+              }
             </p>
           )}
 
@@ -109,15 +152,12 @@ export default function MessageBubble({ message, isOwn }) {
         </div>
       </div>
 
-      {/* Menu de contexto */}
       {menu && (
-        <div
-          ref={menuRef}
-          className="fixed z-50 bg-white rounded-xl shadow-lg border border-gray-100 py-1 min-w-40"
-          style={{ top: menu.y, left: menu.x }}
-        >
+        <div ref={menuRef}
+             className="fixed z-50 bg-white rounded-xl shadow-lg border border-gray-100 py-1 min-w-40"
+             style={{ top: menu.y, left: menu.x }}>
           <button
-            onClick={handleDeleteMe}
+            onClick={() => { actions.deleteMessage(message.id, false); setMenu(null); }}
             className="w-full flex items-center gap-2 px-4 py-2 text-sm text-gray-700
                        hover:bg-gray-50 transition-colors text-left"
           >
@@ -126,10 +166,9 @@ export default function MessageBubble({ message, isOwn }) {
             </svg>
             Apagar para mim
           </button>
-
           {isOwn && (
             <button
-              onClick={handleDeleteAll}
+              onClick={() => { actions.deleteMessage(message.id, true); setMenu(null); }}
               className="w-full flex items-center gap-2 px-4 py-2 text-sm text-red-500
                          hover:bg-red-50 transition-colors text-left"
             >
