@@ -1,0 +1,21 @@
+{
+  "folders": [
+    { "name": "vibe",   "path": "." },
+    { "name": "server", "path": "server" },
+    { "name": "client", "path": "client" }
+  ],
+  "settings": {
+    "editor.formatOnSave": true,
+    "editor.tabSize": 2,
+    "emmet.includeLanguages": { "javascript": "javascriptreact" },
+    "files.exclude": { "**/node_modules": true }
+  },
+  "extensions": {
+    "recommendations": [
+      "esbenp.prettier-vscode",
+      "dbaeumer.vscode-eslint",
+      "bradlc.vscode-tailwindcss",
+      "PKief.material-icon-theme"
+    ]
+  }
+}
