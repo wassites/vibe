@@ -21,7 +21,6 @@ module.exports = {
 
     const sessionCount = countSockets(userId);
 
-    // Registra o novo socket
     addSocket(userId, ws);
     ws._userId    = userId;
     ws._sessionId = `${userId}_${Date.now()}`;
@@ -33,7 +32,6 @@ module.exports = {
       db.contacts.list(userId),
     ]);
 
-    // Carrega participantes de todas as conversas
     const participantsMap = {};
     const usersMap        = {};
     for (const conv of conversations) {
@@ -44,7 +42,6 @@ module.exports = {
     }
 
     if (sessionCount > 0) {
-      // Já existe outra sessão ativa — notifica esta aba que há duplicata
       ws.send(JSON.stringify({
         event:        'duplicate_session',
         user,
@@ -55,7 +52,6 @@ module.exports = {
         sessionId:    ws._sessionId,
       }));
 
-      // Notifica as outras abas que uma nova sessão tentou conectar
       const sockets = socketMap.get(userId) ?? new Set();
       for (const other of sockets) {
         if (other !== ws && other?.readyState === WebSocket.OPEN) {
@@ -68,7 +64,6 @@ module.exports = {
 
       console.log(`[AUTH] ${name} (${userId}) abriu nova sessão (total: ${sessionCount + 1})`);
     } else {
-      // Primeira sessão — fluxo normal
       ws.send(JSON.stringify({
         event: 'authenticated',
         user, conversations, contacts,
@@ -86,25 +81,20 @@ module.exports = {
     }
   },
 
-  // Aba A autoriza sincronização — gera código de 6 dígitos
   async sync_authorize({ ws, userId, payload }) {
     const { targetSessionId } = payload;
     if (!targetSessionId) return e(ws, 'targetSessionId obrigatório');
 
     const code      = Math.floor(100000 + Math.random() * 900000).toString();
-    const expiresAt = Date.now() + 5 * 60 * 1000; // 5 minutos
+    const expiresAt = Date.now() + 5 * 60 * 1000;
 
     syncCodes.set(code, { fromWs: ws, userId, targetSessionId, code, expiresAt });
-
-    // Limpa código expirado automaticamente
     setTimeout(() => syncCodes.delete(code), 5 * 60 * 1000);
 
-    // Envia código para a aba A mostrar ao usuário
     ws.send(JSON.stringify({ event: 'sync_code_generated', code, expiresIn: 300 }));
     console.log(`[SYNC] código gerado para ${userId}: ${code}`);
   },
 
-  // Aba B envia o código recebido do usuário
   async sync_confirm({ ws, userId, payload }) {
     const { code } = payload;
     if (!code) return e(ws, 'Código obrigatório');
@@ -120,7 +110,6 @@ module.exports = {
 
     syncCodes.delete(code);
 
-    // Pede para aba A enviar a chave privada e histórico
     if (entry.fromWs?.readyState === WebSocket.OPEN) {
       entry.fromWs.send(JSON.stringify({
         event:           'sync_send_keys',
@@ -132,11 +121,9 @@ module.exports = {
     console.log(`[SYNC] sincronização autorizada para ${userId}`);
   },
 
-  // Aba A envia chave privada + histórico para aba B
   async sync_transfer({ ws, userId, payload }) {
     const { targetSessionId, privateKey, conversationHistory } = payload;
 
-    // Encontra o socket da aba B pelo sessionId
     const sockets = socketMap.get(userId) ?? new Set();
     for (const targetWs of sockets) {
       if (targetWs._sessionId === targetSessionId && targetWs?.readyState === WebSocket.OPEN) {
@@ -145,8 +132,6 @@ module.exports = {
           privateKey,
           conversationHistory,
         }));
-
-        // Marca a aba B como autenticada
         targetWs.send(JSON.stringify({ event: 'sync_complete' }));
         console.log(`[SYNC] dados transferidos para sessão ${targetSessionId}`);
         break;
@@ -248,7 +233,6 @@ module.exports = {
       }
     }
 
-    // Entrega para outras sessões do próprio remetente
     const myOtherSockets = socketMap.get(userId) ?? new Set();
     for (const other of myOtherSockets) {
       if (other !== ws && other?.readyState === WebSocket.OPEN) {
@@ -331,4 +315,97 @@ module.exports = {
   },
 
   ping({ ws }) { ws.send(JSON.stringify({ event: 'pong', ts: Date.now() })); },
+
+  // ── Chamadas de áudio e vídeo (WebRTC Signaling) ──────────────────────────
+  //
+  // O servidor NÃO processa o conteúdo das chamadas — só repassa os sinais
+  // de sinalização entre os dois usuários. O áudio/vídeo flui P2P via WebRTC.
+  //
+  // Fluxo:
+  //   Caller  → call_offer   → Callee   (inicia chamada)
+  //   Callee  → call_answer  → Caller   (aceita)
+  //   Ambos   → call_ice     → Ambos    (troca de candidatos de rede)
+  //   Callee  → call_reject  → Caller   (recusou)
+  //   Ambos   → call_end     → Ambos    (encerrou)
+  // ─────────────────────────────────────────────────────────────────────────
+
+  // Caller envia oferta de chamada para o Callee
+  async call_offer({ ws, userId, payload }) {
+    const { to, conversationId, callType, sdp } = payload;
+    if (!to)  return e(ws, 'call_offer: campo "to" obrigatório');
+    if (!sdp) return e(ws, 'call_offer: campo "sdp" obrigatório');
+
+    const peerOnline = (socketMap.get(to)?.size ?? 0) > 0;
+
+    // Peer offline — avisa imediatamente o caller
+    if (!peerOnline) {
+      ws.send(JSON.stringify({
+        event:   'call_unavailable',
+        message: 'Usuário indisponível no momento',
+      }));
+      console.log(`[CALL] call_offer de ${userId} → ${to} (offline)`);
+      return;
+    }
+
+    // Busca dados do caller para mostrar no banner do callee
+    const caller = await db.users.findById(userId);
+
+    deliver(to, 'call_offer', {
+      from:           userId,
+      fromUser:       caller ? { name: caller.name, avatar_url: caller.avatar_url } : null,
+      conversationId,
+      callType,
+      sdp,
+    });
+
+    console.log(`[CALL] call_offer: ${userId} → ${to} (${callType})`);
+  },
+
+  // Callee responde a chamada (aceita)
+  async call_answer({ ws, userId, payload }) {
+    const { to, sdp } = payload;
+    if (!to)  return e(ws, 'call_answer: campo "to" obrigatório');
+    if (!sdp) return e(ws, 'call_answer: campo "sdp" obrigatório');
+
+    deliver(to, 'call_answer', { from: userId, sdp });
+    console.log(`[CALL] call_answer: ${userId} → ${to}`);
+  },
+
+  // Troca de ICE candidates (ambos os lados enviam vários durante a conexão)
+  async call_ice({ ws, userId, payload }) {
+    const { to, candidate } = payload;
+    if (!to)        return e(ws, 'call_ice: campo "to" obrigatório');
+    if (!candidate) return e(ws, 'call_ice: campo "candidate" obrigatório');
+
+    deliver(to, 'call_ice', { from: userId, candidate });
+    // Sem log — ICE gera dezenas de eventos, poluiria o console
+  },
+
+  // Callee recusou a chamada
+  async call_reject({ ws, userId, payload }) {
+    const { to } = payload;
+    if (!to) return e(ws, 'call_reject: campo "to" obrigatório');
+
+    deliver(to, 'call_reject', { from: userId });
+    console.log(`[CALL] call_reject: ${userId} → ${to}`);
+  },
+
+  // Qualquer lado encerrou a chamada
+  async call_end({ ws, userId, payload }) {
+    const { to } = payload;
+    if (!to) return e(ws, 'call_end: campo "to" obrigatório');
+
+    deliver(to, 'call_end', { from: userId });
+    console.log(`[CALL] call_end: ${userId} → ${to}`);
+  },
+
+  // Callee já está em outra chamada
+  async call_busy({ ws, userId, payload }) {
+    const { to } = payload;
+    if (!to) return e(ws, 'call_busy: campo "to" obrigatório');
+
+    deliver(to, 'call_busy', { from: userId });
+    console.log(`[CALL] call_busy: ${userId} → ${to}`);
+  },
+
 };

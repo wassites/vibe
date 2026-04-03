@@ -1,22 +1,40 @@
-import React, { createContext, useContext, useReducer, useCallback } from 'react';
+import React, { createContext, useContext, useReducer, useCallback, useRef } from 'react';
 import { useSocket } from '../hooks/useSocket';
 
+// ─── Estado inicial ────────────────────────────────────────────────────────────
+
 const initial = {
-  connected:          false,
-  me:                 null,
-  conversations:      [],
-  activeConvId:       null,
-  messages:           {},
-  participants:       {},
-  users:              {},
-  typing:             {},
-  contacts:           [],
-  contactSuggestion:  null,
-  duplicateSession:   null,
-  syncRequest:        null,
-  syncCode:           null,
-  syncSendTo:         null,
+  connected:         false,
+  me:                null,
+  conversations:     [],
+  activeConvId:      null,
+  messages:          {},
+  participants:      {},
+  users:             {},
+  typing:            {},
+  contacts:          [],
+  contactSuggestion: null,
+  duplicateSession:  null,
+  syncRequest:       null,
+  syncCode:          null,
+  syncSendTo:        null,
+
+  call: {
+    status:         'idle',   // 'idle' | 'calling' | 'ringing' | 'connected' | 'ended'
+    type:           null,     // 'audio' | 'video'
+    conversationId: null,
+    peerId:         null,
+    peerName:       null,
+    peerAvatar:     null,
+    localStream:    null,
+    remoteStream:   null,
+    isMuted:        false,
+    isCameraOff:    false,
+    startedAt:      null,
+  },
 };
+
+// ─── Reducer ───────────────────────────────────────────────────────────────────
 
 function reducer(state, action) {
   switch (action.type) {
@@ -159,7 +177,9 @@ function reducer(state, action) {
       }
       const contacts = state.contacts.map(c =>
         c.id === action.userId
-          ? { ...c, status: action.status, ...(action.name ? { name: action.name } : {}), ...(action.avatarUrl ? { avatar_url: action.avatarUrl } : {}) }
+          ? { ...c, status: action.status,
+              ...(action.name      ? { name:       action.name }      : {}),
+              ...(action.avatarUrl ? { avatar_url: action.avatarUrl } : {}) }
           : c
       );
       return { ...state, users, contacts };
@@ -194,19 +214,139 @@ function reducer(state, action) {
     case 'DISMISS_SUGGESTION':
       return { ...state, contactSuggestion: null };
 
-    case 'SET_ACTIVE': return { ...state, activeConvId: action.convId };
+    case 'SET_ACTIVE':
+      return { ...state, activeConvId: action.convId };
+
+    // ── Chamadas ──────────────────────────────────────────────────────────────
+
+    case 'CALL_OUTGOING':
+      return {
+        ...state,
+        call: {
+          ...initial.call,
+          status:         'calling',
+          type:           action.callType,
+          conversationId: action.conversationId,
+          peerId:         action.peerId,
+          peerName:       action.peerName,
+          peerAvatar:     action.peerAvatar,
+          localStream:    action.localStream,
+        },
+      };
+
+    case 'CALL_INCOMING':
+      return {
+        ...state,
+        call: {
+          ...initial.call,
+          status:         'ringing',
+          type:           action.callType,
+          conversationId: action.conversationId,
+          peerId:         action.peerId,
+          peerName:       action.peerName,
+          peerAvatar:     action.peerAvatar,
+        },
+      };
+
+    case 'CALL_CONNECTED':
+      return {
+        ...state,
+        call: {
+          ...state.call,
+          status:       'connected',
+          localStream:  action.localStream  ?? state.call.localStream,
+          remoteStream: action.remoteStream ?? state.call.remoteStream,
+          startedAt:    Date.now(),
+        },
+      };
+
+    case 'CALL_REMOTE_STREAM':
+      return {
+        ...state,
+        call: { ...state.call, remoteStream: action.remoteStream },
+      };
+
+    case 'CALL_TOGGLE_MUTE':
+      return { ...state, call: { ...state.call, isMuted: !state.call.isMuted } };
+
+    case 'CALL_TOGGLE_CAMERA':
+      return { ...state, call: { ...state.call, isCameraOff: !state.call.isCameraOff } };
+
+    case 'CALL_ENDED':
+      return { ...state, call: { ...initial.call } };
 
     default: return state;
   }
 }
 
+// ─── Contexto ──────────────────────────────────────────────────────────────────
+
 const ChatContext = createContext(null);
+
+const ICE_SERVERS = {
+  iceServers: [
+    { urls: 'stun:stun.l.google.com:19302'  },
+    { urls: 'stun:stun1.l.google.com:19302' },
+  ],
+};
 
 export function ChatProvider({ children }) {
   const [state, dispatch] = useReducer(reducer, initial);
 
+  const pcRef          = useRef(null);
+  const localStreamRef = useRef(null);
+  const sendRef        = useRef(null);
+
+  // ── Helpers WebRTC ──────────────────────────────────────────────────────────
+
+  function stopLocalStream() {
+    localStreamRef.current?.getTracks().forEach(t => t.stop());
+    localStreamRef.current = null;
+  }
+
+  function closePC() {
+    if (pcRef.current) {
+      pcRef.current.onicecandidate          = null;
+      pcRef.current.ontrack                 = null;
+      pcRef.current.onconnectionstatechange = null;
+      pcRef.current.close();
+      pcRef.current = null;
+    }
+  }
+
+  function cleanupCall() {
+    stopLocalStream();
+    closePC();
+    dispatch({ type: 'CALL_ENDED' });
+  }
+
+  function createPC(peerId) {
+    const pc = new RTCPeerConnection(ICE_SERVERS);
+
+    pc.onicecandidate = ({ candidate }) => {
+      if (candidate) sendRef.current?.('call_ice', { to: peerId, candidate });
+    };
+
+    pc.ontrack = (event) => {
+      const [remoteStream] = event.streams;
+      dispatch({ type: 'CALL_REMOTE_STREAM', remoteStream });
+    };
+
+    pc.onconnectionstatechange = () => {
+      if (['disconnected', 'failed', 'closed'].includes(pc.connectionState)) {
+        cleanupCall();
+      }
+    };
+
+    pcRef.current = pc;
+    return pc;
+  }
+
+  // ── Handler de mensagens do socket ─────────────────────────────────────────
+
   const handleMessage = useCallback((data) => {
     switch (data.event) {
+
       case 'authenticated':
         dispatch({ type: 'AUTHENTICATED', user: data.user, conversations: data.conversations, contacts: data.contacts, participantsMap: data.participantsMap, usersMap: data.usersMap });
         break;
@@ -283,17 +423,78 @@ export function ChatProvider({ children }) {
       case 'error':
         console.error('[WS]', data.message);
         break;
+
+      // ── Sinalização WebRTC ──────────────────────────────────────────────────
+
+      case 'call_offer': {
+        const peer = data.fromUser ?? {};
+        // Guarda o SDP para o answerCall usar
+        pcRef._pendingOffer = data.sdp;
+        dispatch({
+          type:           'CALL_INCOMING',
+          callType:       data.callType,
+          conversationId: data.conversationId,
+          peerId:         data.from,
+          peerName:       peer.name       ?? 'Desconhecido',
+          peerAvatar:     peer.avatar_url ?? null,
+        });
+        break;
+      }
+
+      case 'call_answer': {
+        if (pcRef.current) {
+          pcRef.current
+            .setRemoteDescription(new RTCSessionDescription({ type: 'answer', sdp: data.sdp }))
+            .catch(err => console.error('[WebRTC] setRemoteDescription answer:', err));
+        }
+        dispatch({ type: 'CALL_CONNECTED' });
+        break;
+      }
+
+      case 'call_ice': {
+        if (pcRef.current && data.candidate) {
+          pcRef.current
+            .addIceCandidate(new RTCIceCandidate(data.candidate))
+            .catch(err => console.error('[WebRTC] addIceCandidate:', err));
+        }
+        break;
+      }
+
+      case 'call_unavailable':
+        console.warn('[WebRTC] peer indisponível');
+        cleanupCall();
+        alert('Usuário indisponível no momento.');
+        break;
+
+      case 'call_reject':
+        cleanupCall();
+        break;
+
+      case 'call_end':
+        cleanupCall();
+        break;
+
+      case 'call_busy':
+        cleanupCall();
+        alert('Usuário ocupado em outra chamada.');
+        break;
     }
-  }, []);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const { send } = useSocket({
     onOpen:    () => dispatch({ type: 'CONNECTED' }),
-    onClose:   () => dispatch({ type: 'DISCONNECTED' }),
+    onClose:   () => { dispatch({ type: 'DISCONNECTED' }); cleanupCall(); },
     onMessage: handleMessage,
   });
 
+  sendRef.current = send;
+
+  // ── Actions ────────────────────────────────────────────────────────────────
+
   const actions = {
-    auth:               (userId, name, avatarUrl)             => { localStorage.setItem('vibe_userId', userId); send('auth', { userId, name, avatarUrl }); },
+
+    // ── Originais ───────────────────────────────────────────────────────────
+    auth:               (userId, name, avatarUrl)              => { localStorage.setItem('vibe_userId', userId); send('auth', { userId, name, avatarUrl }); },
     addContact:         (contactId, nickname)                  => send('add_contact',         { contactId, nickname }),
     addContactByName:   (name, nickname)                       => send('add_contact_by_name', { name, nickname }),
     removeContact:      (contactId)                            => send('remove_contact',      { contactId }),
@@ -311,6 +512,152 @@ export function ChatProvider({ children }) {
     syncTransfer:       (targetSessionId, privateKey)          => send('sync_transfer',       { targetSessionId, privateKey, conversationHistory: {} }),
     dismissSync:        ()                                     => dispatch({ type: 'DISMISS_SYNC' }),
     setActive:          (convId)                               => dispatch({ type: 'SET_ACTIVE', convId }),
+
+    // ── Chamadas ─────────────────────────────────────────────────────────────
+
+    startCall: async (conversationId, peerId, callType = 'audio') => {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: true,
+          video: callType === 'video',
+        });
+        localStreamRef.current = stream;
+
+        const pc = createPC(peerId);
+        stream.getTracks().forEach(track => pc.addTrack(track, stream));
+
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+
+        const peer = state.users[peerId] ?? {};
+        dispatch({
+          type:           'CALL_OUTGOING',
+          callType,
+          conversationId,
+          peerId,
+          peerName:       peer.name       ?? 'Desconhecido',
+          peerAvatar:     peer.avatar_url ?? null,
+          localStream:    stream,
+        });
+
+        send('call_offer', { to: peerId, conversationId, callType, sdp: offer.sdp });
+
+      } catch (err) {
+        console.error('[WebRTC] startCall:', err);
+        cleanupCall();
+        if (err.name === 'NotAllowedError') {
+          alert('Permissão de câmera/microfone negada. Verifique as configurações do navegador.');
+        } else if (err.name === 'NotFoundError') {
+          alert('Câmera ou microfone não encontrado neste dispositivo.');
+        } else {
+          alert('Não foi possível iniciar a chamada.');
+        }
+      }
+    },
+
+    answerCall: async () => {
+      const { peerId, type: callType } = state.call;
+      const pendingSdp = pcRef._pendingOffer;
+      if (!peerId || !pendingSdp) return;
+
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: true,
+          video: callType === 'video',
+        });
+        localStreamRef.current = stream;
+
+        const pc = createPC(peerId);
+        stream.getTracks().forEach(track => pc.addTrack(track, stream));
+
+        await pc.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp: pendingSdp }));
+
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+
+        dispatch({ type: 'CALL_CONNECTED', localStream: stream });
+
+        send('call_answer', { to: peerId, sdp: answer.sdp });
+
+        pcRef._pendingOffer = null;
+
+      } catch (err) {
+        console.error('[WebRTC] answerCall:', err);
+        cleanupCall();
+        if (err.name === 'NotAllowedError') {
+          alert('Permissão de câmera/microfone negada.');
+        } else {
+          alert('Não foi possível atender a chamada.');
+        }
+      }
+    },
+
+    rejectCall: () => {
+      const { peerId } = state.call;
+      if (peerId) send('call_reject', { to: peerId });
+      cleanupCall();
+    },
+
+    endCall: () => {
+      const { peerId } = state.call;
+      if (peerId) send('call_end', { to: peerId });
+      cleanupCall();
+    },
+
+    toggleMute: () => {
+      const stream = localStreamRef.current;
+      if (stream) {
+        const nowMuted = !state.call.isMuted;
+        stream.getAudioTracks().forEach(t => { t.enabled = !nowMuted; });
+      }
+      dispatch({ type: 'CALL_TOGGLE_MUTE' });
+    },
+
+    toggleCamera: () => {
+      const stream = localStreamRef.current;
+      if (stream) {
+        const nowOff = !state.call.isCameraOff;
+        stream.getVideoTracks().forEach(t => { t.enabled = !nowOff; });
+      }
+      dispatch({ type: 'CALL_TOGGLE_CAMERA' });
+    },
+
+    // Troca câmera frontal ↔ traseira (mobile)
+    // Recebe localVideoRef do useWebRTC para atualizar o preview
+    switchCamera: async (localVideoRef) => {
+      const stream = localStreamRef.current;
+      const pc     = pcRef.current;
+      if (!stream || !pc) return;
+
+      const currentTrack  = stream.getVideoTracks()[0];
+      if (!currentTrack) return;
+
+      const currentFacing = currentTrack.getSettings().facingMode ?? 'user';
+      const nextFacing    = currentFacing === 'user' ? 'environment' : 'user';
+
+      try {
+        const newStream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: nextFacing },
+        });
+        const newTrack = newStream.getVideoTracks()[0];
+
+        // Substitui track no PeerConnection sem renegociação
+        const sender = pc.getSenders().find(s => s.track?.kind === 'video');
+        if (sender) await sender.replaceTrack(newTrack);
+
+        // Substitui no stream local
+        stream.removeTrack(currentTrack);
+        currentTrack.stop();
+        stream.addTrack(newTrack);
+
+        // Atualiza preview via ref
+        if (localVideoRef?.current) {
+          localVideoRef.current.srcObject = stream;
+        }
+      } catch (err) {
+        console.error('[WebRTC] switchCamera:', err);
+      }
+    },
   };
 
   return (

@@ -1,3 +1,5 @@
+// client/src/App.jsx
+
 import React, { useEffect, useRef } from 'react';
 import { ChatProvider, useChat } from './context/ChatContext';
 import { useCrypto } from './hooks/useCrypto';
@@ -7,15 +9,16 @@ import Sidebar from './components/Sidebar';
 import ChatWindow from './components/ChatWindow';
 import DuplicateSession from './components/DuplicateSession';
 import SyncRequest from './components/SyncRequest';
+import IncomingCall from './components/IncomingCall';
+import CallModal from './components/CallModal';
 
 function Layout() {
   useTheme();
   const { state, actions } = useChat();
   const { initKeys, hasPrivateKey, recoverKeys } = useCrypto();
 
-  const { me, duplicateSession, syncRequest, syncCode } = state;
+  const { me, duplicateSession, syncRequest, syncCode, call } = state;
 
-  // Callback para quando o código for gerado — guardado em ref para não criar closure stale
   const onCodeReadyRef = useRef(null);
 
   // Inicializa chaves ao autenticar
@@ -38,13 +41,11 @@ function Layout() {
     }
   }, [syncCode]);
 
-  // Aba A — usuário clicou em Autorizar
   function handleAuthorize(onCodeReady) {
     onCodeReadyRef.current = onCodeReady;
     actions.syncAuthorize(syncRequest.sessionId);
   }
 
-  // Aba B — usuário digitou o código
   function handleSync(code) {
     actions.syncConfirm(code);
   }
@@ -53,10 +54,14 @@ function Layout() {
 
   return (
     <div className="flex h-screen w-screen overflow-hidden relative">
+
+      {/* ── Layout principal ─────────────────────────────────────────────── */}
       <Sidebar />
       <ChatWindow />
 
-      {/* Modal na aba B — sessão duplicada, aguardando autorização */}
+      {/* ── Modais de sessão/sync ────────────────────────────────────────── */}
+
+      {/* Aba B — sessão duplicada, aguardando autorização */}
       {duplicateSession && !syncRequest && (
         <DuplicateSession
           sessionId={duplicateSession.sessionId}
@@ -65,13 +70,22 @@ function Layout() {
         />
       )}
 
-      {/* Modal na aba A — nova sessão detectada */}
+      {/* Aba A — nova sessão detectada */}
       {syncRequest && (
         <SyncRequest
           onAuthorize={handleAuthorize}
           onDeny={actions.dismissSync}
         />
       )}
+
+      {/* ── Chamadas — flutuam sobre tudo ────────────────────────────────── */}
+
+      {/* Banner de chamada recebida (status === 'ringing') */}
+      <IncomingCall />
+
+      {/* Tela da chamada ativa (status === 'calling' | 'connected') */}
+      {['calling', 'connected'].includes(call.status) && <CallModal />}
+
     </div>
   );
 }
