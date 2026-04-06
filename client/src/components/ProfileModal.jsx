@@ -3,7 +3,8 @@ import { useChat } from '../context/ChatContext';
 import { useTheme } from '../hooks/useTheme';
 import Avatar from './Avatar';
 
-const API = `http://${window.location.hostname}:3001`;
+import { API_URL } from '../lib/api';
+const API = API_URL;
 
 const COLOR_OPTIONS = [
   { label: 'Verde WhatsApp', accent: '#25d366', accentDim: '#128c7e', bubbleOut: '#dcf8c6' },

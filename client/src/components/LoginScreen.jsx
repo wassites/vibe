@@ -1,7 +1,8 @@
 import React, { useState } from 'react';
 import { useChat } from '../context/ChatContext';
 
-const API = `http://${window.location.hostname}:3001`;
+import { API_URL } from '../lib/api';
+const API = API_URL;
 
 export default function LoginScreen() {
   const { actions } = useChat();

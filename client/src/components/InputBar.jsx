@@ -5,7 +5,8 @@ import { useChat } from '../context/ChatContext';
 import { useCrypto } from '../hooks/useCrypto';
 import StickerPicker from './StickerPicker';
 
-const API = `http://${window.location.hostname}:3001`;
+import { API_URL } from '../lib/api';
+const API = API_URL;
 
 export default function InputBar({ conversationId }) {
   const { actions, state } = useChat();
