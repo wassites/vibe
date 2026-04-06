@@ -1,13 +1,11 @@
-// Endereço do servidor — use o IP local para o celular conseguir conectar
-export const BASE_URL = 'http://10.220.0.5:3001';
-export const WS_URL   = 'ws://10.220.0.5:3001';
+export const BASE_URL = "https://vibe-server-dy2z.onrender.com";
+export const WS_URL = "wss://vibe-server-dy2z.onrender.com";
 
-// Requisição REST genérica
 export async function post(path, body, token = null) {
   const res = await fetch(`${BASE_URL}${path}`, {
-    method:  'POST',
+    method: "POST",
     headers: {
-      'Content-Type': 'application/json',
+      "Content-Type": "application/json",
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
     },
     body: JSON.stringify(body),
