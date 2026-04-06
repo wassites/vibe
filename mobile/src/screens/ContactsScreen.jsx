@@ -1,139 +1,240 @@
+// mobile/src/screens/ContactsScreen.jsx
+
 import React, { useState, useEffect } from 'react';
 import {
   View, Text, FlatList, TouchableOpacity,
-  ActivityIndicator, StyleSheet, Alert,
+  TextInput, StyleSheet, ActivityIndicator,
+  Alert,
 } from 'react-native';
-import * as Contacts from 'expo-contacts';
-import { getToken } from '../lib/storage';
-import { post } from '../lib/api';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useChat } from '../context/ChatContext';
+
+function Avatar({ name, size = 46 }) {
+  const colors = ['#7c3aed','#2563eb','#059669','#dc2626','#d97706','#0891b2'];
+  const color  = colors[(name?.charCodeAt(0) ?? 0) % colors.length];
+  return (
+    <View style={{
+      width: size, height: size, borderRadius: size / 2,
+      backgroundColor: color, alignItems: 'center',
+      justifyContent: 'center', marginRight: 12,
+    }}>
+      <Text style={{ color: '#fff', fontSize: size * 0.4, fontWeight: '700' }}>
+        {(name ?? '?')[0].toUpperCase()}
+      </Text>
+    </View>
+  );
+}
 
 export default function ContactsScreen({ navigation }) {
-  const [loading, setLoading]   = useState(true);
-  const [vibeContacts, setVibeContacts] = useState([]); // contatos que estão no Vibe
-  const [syncing, setSyncing]   = useState(false);
+  const { state, actions } = useChat();
+  const insets = useSafeAreaInsets();
+  const { contacts, conversations, participants, me } = state;
 
+  const [search,  setSearch]  = useState('');
+  const [adding,  setAdding]  = useState(false);
+  const [newName, setNewName] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [error,   setError]   = useState(null);
+  const [opening, setOpening] = useState(null); // id do contato sendo aberto
+
+  // Carrega contatos ao abrir
   useEffect(() => {
-    syncContacts();
+    actions.getContacts();
   }, []);
 
-  async function syncContacts() {
-    try {
-      setSyncing(true);
+  // Quando conversation_ready chegar, navega para o chat
+  // Isso é disparado quando o servidor responde ao openDirect
+  useEffect(() => {
+    if (!opening) return;
 
-      // 1. Pedir permissão da agenda
-      const { status } = await Contacts.requestPermissionsAsync();
-      if (status !== 'granted') {
-        Alert.alert(
-          'Permissão negada',
-          'Precisamos acessar sua agenda para encontrar seus contatos no Vibe.'
-        );
-        setLoading(false);
-        return;
-      }
-
-      // 2. Buscar todos os contatos do celular
-      const { data } = await Contacts.getContactsAsync({
-        fields: [Contacts.Fields.PhoneNumbers, Contacts.Fields.Name],
+    // Procura a conversa direta com o contato que estamos abrindo
+    const conv = conversations.find(c => {
+      if (c.type !== 'direct') return false;
+      const parts = participants[c.id] ?? [];
+      return parts.some(p => {
+        const uid = typeof p === 'string' ? p : p?.id;
+        return uid === opening;
       });
+    });
 
-      // 3. Extrair os números de telefone
-      const phones = [];
-      for (const contact of data) {
-        if (!contact.phoneNumbers) continue;
-        for (const p of contact.phoneNumbers) {
-          // Normalizar: remover espaços, traços, parênteses
-          const normalized = p.number.replace(/\D/g, '');
-          if (normalized.length >= 8) {
-            phones.push({
-              phone:    normalized,
-              name:     contact.name,
-            });
-          }
-        }
-      }
+    if (conv) {
+      setOpening(null);
+      // Navega para o chat com os dados corretos
+      navigation.navigate('Home', {
+        screen: 'HomeScreen',
+      });
+      // Pequeno delay para garantir que a navegação aconteceu
+      setTimeout(() => {
+        const contact = contacts.find(c => c.id === opening);
+        navigation.navigate('Home', {
+          screen: 'Chat',
+          params: {
+            conversationId: conv.id,
+            title:          contact?.name ?? 'Conversa',
+            peerId:         opening,
+          },
+        });
+      }, 100);
+    }
+  }, [conversations, opening]);
 
-      // 4. Enviar para o servidor verificar quem está no Vibe
-      const token = await getToken();
-      const res   = await post('/api/contacts/sync', { phones }, token);
+  // Filtra contatos pelo search
+  const filtered = contacts.filter(c =>
+    c.name?.toLowerCase().includes(search.toLowerCase())
+  );
 
-      if (res.found) {
-        setVibeContacts(res.found);
-      }
+  // Abre conversa direta — envia evento e espera conversation_ready
+  function openChat(contact) {
+    setOpening(contact.id);
+    actions.openDirect(contact.id);
+  }
 
-    } catch (err) {
-      console.error('[CONTACTS]', err.message);
-      Alert.alert('Erro', 'Não foi possível sincronizar os contatos.');
-    } finally {
+  // Adiciona contato por nome
+  async function handleAddContact() {
+    const name = newName.trim();
+    if (!name) return;
+    setLoading(true);
+    setError(null);
+    try {
+      actions.addContactByName(name);
+      // Aguarda um momento para o servidor responder
+      setTimeout(() => {
+        actions.getContacts();
+        setNewName('');
+        setAdding(false);
+        setLoading(false);
+      }, 1000);
+    } catch {
+      setError('Usuário não encontrado');
       setLoading(false);
-      setSyncing(false);
     }
   }
 
+  function handleRemove(contact) {
+    Alert.alert(
+      'Remover contato',
+      `Remover ${contact.name} dos seus contatos?`,
+      [
+        { text: 'Cancelar', style: 'cancel' },
+        {
+          text: 'Remover',
+          style: 'destructive',
+          onPress: () => actions.removeContact(contact.id),
+        },
+      ]
+    );
+  }
+
   function renderContact({ item }) {
+    const isOnline  = item.status === 'online';
+    const isOpening = opening === item.id;
+
     return (
       <TouchableOpacity
-        style={styles.item}
-        onPress={() => navigation.navigate('Chat', { contact: item })}
+        style={s.item}
+        onPress={() => openChat(item)}
+        onLongPress={() => handleRemove(item)}
+        activeOpacity={0.7}
+        disabled={!!opening}
       >
-        {/* Avatar */}
-        <View style={styles.avatar}>
-          <Text style={styles.avatarLetter}>
-            {item.name.charAt(0).toUpperCase()}
-          </Text>
+        {/* Avatar com dot online */}
+        <View style={{ position: 'relative' }}>
+          <Avatar name={item.name} />
+          {isOnline && <View style={s.onlineDot} />}
         </View>
 
         {/* Info */}
-        <View style={styles.info}>
-          <Text style={styles.name}>{item.name}</Text>
-          <Text style={styles.phone}>{item.phone}</Text>
+        <View style={s.info}>
+          <Text style={s.name}>{item.name}</Text>
+          <Text style={[s.status, isOnline && s.statusOnline]}>
+            {isOnline ? '● online' : '○ offline'}
+          </Text>
         </View>
 
-        {/* Status online */}
-        {item.status === 'online' && (
-          <View style={styles.onlineDot} />
-        )}
+        {/* Ícone ou loading */}
+        {isOpening
+          ? <ActivityIndicator color="#a855f7" size="small" />
+          : <Text style={s.chatIcon}>💬</Text>
+        }
       </TouchableOpacity>
     );
   }
 
-  if (loading) {
-    return (
-      <View style={styles.center}>
-        <ActivityIndicator size="large" color="#a855f7" />
-        <Text style={styles.loadingText}>Sincronizando contatos...</Text>
-      </View>
-    );
-  }
-
   return (
-    <View style={styles.container}>
+    <View style={s.container}>
 
-      {/* Cabeçalho */}
-      <View style={styles.header}>
-        <Text style={styles.title}>Contatos</Text>
-        <TouchableOpacity onPress={syncContacts} disabled={syncing}>
-          <Text style={styles.syncBtn}>
-            {syncing ? 'Sincronizando...' : '↻ Sincronizar'}
-          </Text>
+      {/* Header */}
+      <View style={[s.header, { paddingTop: insets.top + 12 }]}>
+        <Text style={s.title}>Contatos</Text>
+        <TouchableOpacity
+          style={s.addBtn}
+          onPress={() => { setAdding(v => !v); setError(null); setNewName(''); }}
+          activeOpacity={0.8}
+        >
+          <Text style={s.addBtnText}>{adding ? '✕' : '+ Adicionar'}</Text>
         </TouchableOpacity>
       </View>
 
-      {vibeContacts.length === 0 ? (
-        <View style={styles.center}>
-          <Text style={styles.emptyIcon}>👥</Text>
-          <Text style={styles.emptyText}>
-            Nenhum contato seu está no Vibe ainda.
+      {/* Adicionar por nome */}
+      {adding && (
+        <View style={s.addBox}>
+          <TextInput
+            style={s.addInput}
+            placeholder="Nome do usuário..."
+            placeholderTextColor="#64748b"
+            value={newName}
+            onChangeText={t => { setNewName(t); setError(null); }}
+            autoFocus
+            returnKeyType="done"
+            onSubmitEditing={handleAddContact}
+            editable={!loading}
+          />
+          <TouchableOpacity
+            style={[s.addConfirm, (!newName.trim() || loading) && s.addConfirmDisabled]}
+            onPress={handleAddContact}
+            disabled={!newName.trim() || loading}
+          >
+            {loading
+              ? <ActivityIndicator color="#fff" size="small" />
+              : <Text style={s.addConfirmText}>Adicionar</Text>
+            }
+          </TouchableOpacity>
+          {error && <Text style={s.error}>{error}</Text>}
+        </View>
+      )}
+
+      {/* Busca */}
+      {contacts.length > 0 && (
+        <View style={s.searchBox}>
+          <TextInput
+            style={s.searchInput}
+            placeholder="Buscar contato..."
+            placeholderTextColor="#64748b"
+            value={search}
+            onChangeText={setSearch}
+          />
+        </View>
+      )}
+
+      {/* Lista */}
+      {filtered.length === 0 ? (
+        <View style={s.empty}>
+          <Text style={s.emptyIcon}>👥</Text>
+          <Text style={s.emptyText}>
+            {contacts.length === 0 ? 'Nenhum contato ainda' : 'Nenhum resultado'}
           </Text>
-          <Text style={styles.emptySubtext}>
-            Convide seus amigos para entrar!
+          <Text style={s.emptySub}>
+            {contacts.length === 0
+              ? 'Toque em "+ Adicionar" para buscar pelo nome'
+              : 'Tente outro nome'}
           </Text>
         </View>
       ) : (
         <FlatList
-          data={vibeContacts}
-          keyExtractor={item => item.id}
+          data={filtered}
+          keyExtractor={c => c.id}
           renderItem={renderContact}
-          contentContainerStyle={{ paddingBottom: 20 }}
+          contentContainerStyle={{ paddingBottom: insets.bottom + 20 }}
         />
       )}
 
@@ -141,26 +242,53 @@ export default function ContactsScreen({ navigation }) {
   );
 }
 
-const styles = StyleSheet.create({
-  container:    { flex: 1, backgroundColor: '#0d0d14' },
-  center:       { flex: 1, justifyContent: 'center', alignItems: 'center', gap: 12 },
-  header:       { flexDirection: 'row', justifyContent: 'space-between',
-                  alignItems: 'center', padding: 16,
-                  borderBottomWidth: 1, borderBottomColor: '#2a2a45' },
-  title:        { fontSize: 20, fontWeight: '700', color: '#e2e8f0' },
-  syncBtn:      { fontSize: 13, color: '#a855f7' },
-  loadingText:  { color: '#64748b', marginTop: 12 },
-  emptyIcon:    { fontSize: 48, marginBottom: 8 },
-  emptyText:    { color: '#e2e8f0', fontSize: 16, fontWeight: '600' },
-  emptySubtext: { color: '#64748b', fontSize: 13 },
-  item:         { flexDirection: 'row', alignItems: 'center',
-                  padding: 14, borderBottomWidth: 1, borderBottomColor: '#1a1a2e' },
-  avatar:       { width: 46, height: 46, borderRadius: 23,
-                  backgroundColor: '#4c1d95', justifyContent: 'center',
-                  alignItems: 'center', marginRight: 12 },
-  avatarLetter: { color: '#fff', fontSize: 18, fontWeight: '700' },
-  info:         { flex: 1 },
-  name:         { color: '#e2e8f0', fontSize: 15, fontWeight: '600' },
-  phone:        { color: '#64748b', fontSize: 13, marginTop: 2 },
-  onlineDot:    { width: 10, height: 10, borderRadius: 5, backgroundColor: '#4ade80' },
+const s = StyleSheet.create({
+  container:  { flex: 1, backgroundColor: '#0d0d14' },
+
+  header:     { flexDirection: 'row', justifyContent: 'space-between',
+                alignItems: 'center', paddingHorizontal: 16,
+                paddingBottom: 16, borderBottomWidth: 1,
+                borderBottomColor: '#2a2a45' },
+  title:      { fontSize: 22, fontWeight: '800', color: '#e2e8f0' },
+  addBtn:     { backgroundColor: '#4c1d95', paddingHorizontal: 14,
+                paddingVertical: 8, borderRadius: 20 },
+  addBtnText: { color: '#e2e8f0', fontSize: 13, fontWeight: '600' },
+
+  addBox:     { padding: 16, borderBottomWidth: 1,
+                borderBottomColor: '#2a2a45', gap: 8 },
+  addInput:   { backgroundColor: '#1a1a2e', borderWidth: 1,
+                borderColor: '#2a2a45', borderRadius: 12,
+                paddingHorizontal: 16, paddingVertical: 12,
+                color: '#e2e8f0', fontSize: 15 },
+  addConfirm: { backgroundColor: '#7c3aed', borderRadius: 12,
+                paddingVertical: 12, alignItems: 'center' },
+  addConfirmDisabled: { opacity: 0.4 },
+  addConfirmText: { color: '#fff', fontWeight: '700', fontSize: 15 },
+  error:      { color: '#f87171', fontSize: 13, textAlign: 'center' },
+
+  searchBox:  { paddingHorizontal: 16, paddingVertical: 10,
+                borderBottomWidth: 1, borderBottomColor: '#1a1a2e' },
+  searchInput:{ backgroundColor: '#1a1a2e', borderWidth: 1,
+                borderColor: '#2a2a45', borderRadius: 10,
+                paddingHorizontal: 14, paddingVertical: 10,
+                color: '#e2e8f0', fontSize: 14 },
+
+  item:       { flexDirection: 'row', alignItems: 'center',
+                paddingHorizontal: 16, paddingVertical: 12,
+                borderBottomWidth: 1, borderBottomColor: '#1a1a2e' },
+  info:       { flex: 1 },
+  name:       { color: '#e2e8f0', fontSize: 15, fontWeight: '600' },
+  status:     { color: '#64748b', fontSize: 12, marginTop: 2 },
+  statusOnline: { color: '#4ade80' },
+  chatIcon:   { fontSize: 20 },
+  onlineDot:  { position: 'absolute', bottom: 0, right: 12,
+                width: 12, height: 12, borderRadius: 6,
+                backgroundColor: '#4ade80',
+                borderWidth: 2, borderColor: '#0d0d14' },
+
+  empty:      { flex: 1, justifyContent: 'center', alignItems: 'center', gap: 8 },
+  emptyIcon:  { fontSize: 48, marginBottom: 4 },
+  emptyText:  { color: '#e2e8f0', fontSize: 16, fontWeight: '600' },
+  emptySub:   { color: '#64748b', fontSize: 13, textAlign: 'center',
+                paddingHorizontal: 40 },
 });

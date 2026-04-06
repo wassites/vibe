@@ -1,13 +1,20 @@
-import React, { useState, useEffect } from 'react';
-import { StatusBar } from 'expo-status-bar';
-import { View, ActivityIndicator, StyleSheet } from 'react-native';
-import { getToken, getUser } from './src/lib/storage';
-import { ChatProvider } from './src/context/ChatContext';
-import Navigation from './src/navigation';
+// mobile/App.js
 
-export default function App() {
+import React, { useState, useEffect } from 'react';
+import { View, ActivityIndicator } from 'react-native';
+import { getToken, getUser } from './src/lib/storage';
+import { ChatProvider, useChat } from './src/context/ChatContext';
+import Navigation   from './src/navigation';
+import IncomingCall from './src/components/IncomingCall';
+import CallModal    from './src/components/CallModal';
+
+// ── Componente interno ────────────────────────────────────────────────────────
+// Separado do App pois useChat() só funciona dentro do ChatProvider
+
+function AppContent() {
+  const { actions } = useChat();
+  const [loading,    setLoading]    = useState(true);
   const [isLoggedIn, setIsLoggedIn] = useState(false);
-  const [loading, setLoading]       = useState(true);
 
   useEffect(() => {
     checkAuth();
@@ -15,10 +22,15 @@ export default function App() {
 
   async function checkAuth() {
     try {
-      // Verificar se já tem token salvo no SecureStore
-      const token = await getToken();
-      const user  = await getUser();
-      setIsLoggedIn(!!(token && user));
+      const token  = await getToken();
+      const user   = await getUser();
+      const logged = !!(token && user);
+      setIsLoggedIn(logged);
+
+      // Se já tem sessão salva, conecta o WebSocket automaticamente
+      if (logged) {
+        actions.connect();
+      }
     } catch {
       setIsLoggedIn(false);
     } finally {
@@ -26,29 +38,41 @@ export default function App() {
     }
   }
 
-  // Tela de splash enquanto verifica o token
+  // Splash enquanto verifica token
   if (loading) {
     return (
-      <View style={styles.splash}>
-        <StatusBar style="light" />
+      <View style={{
+        flex: 1, backgroundColor: '#0d0d14',
+        justifyContent: 'center', alignItems: 'center',
+      }}>
         <ActivityIndicator size="large" color="#a855f7" />
       </View>
     );
   }
 
   return (
-    <ChatProvider>
-      <StatusBar style="light" />
-      <Navigation isLoggedIn={isLoggedIn} />
-    </ChatProvider>
+    <>
+      {/* Navegação principal */}
+      <Navigation
+        isLoggedIn={isLoggedIn}
+        onLogin={() => setIsLoggedIn(true)}
+      />
+
+      {/* Chamada recebida — flutua sobre tudo */}
+      <IncomingCall />
+
+      {/* Tela da chamada ativa — flutua sobre tudo */}
+      <CallModal />
+    </>
   );
 }
 
-const styles = StyleSheet.create({
-  splash: {
-    flex:            1,
-    backgroundColor: '#0d0d14',
-    justifyContent:  'center',
-    alignItems:      'center',
-  },
-});
+// ── App raiz ──────────────────────────────────────────────────────────────────
+
+export default function App() {
+  return (
+    <ChatProvider>
+      <AppContent />
+    </ChatProvider>
+  );
+}

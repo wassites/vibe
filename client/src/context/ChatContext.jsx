@@ -20,8 +20,8 @@ const initial = {
   syncSendTo:        null,
 
   call: {
-    status:         'idle',   // 'idle' | 'calling' | 'ringing' | 'connected' | 'ended'
-    type:           null,     // 'audio' | 'video'
+    status:         'idle',
+    type:           null,
     conversationId: null,
     peerId:         null,
     peerName:       null,
@@ -107,6 +107,22 @@ function reducer(state, action) {
       };
     }
 
+    // ── Histórico carregado via get_history ───────────────────────────────────
+    // Mescla mensagens novas que já chegaram com o histórico antigo
+    // sem duplicar e mantendo a ordem cronológica
+    case 'HISTORY_LOADED': {
+      const prev   = state.messages[action.conversationId] ?? [];
+      const merged = [...action.messages];
+      prev.forEach(m => {
+        if (!merged.some(x => x.id === m.id)) merged.push(m);
+      });
+      merged.sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+      return {
+        ...state,
+        messages: { ...state.messages, [action.conversationId]: merged },
+      };
+    }
+
     case 'GROUP_CREATED': {
       const users        = { ...state.users };
       const participants = { ...state.participants, [action.conversation.id]: action.participants ?? [] };
@@ -138,6 +154,22 @@ function reducer(state, action) {
       return { ...state, messages: { ...state.messages, [conversationId]: prev.filter(m => m.id !== messageId) } };
     }
 
+    case 'MESSAGE_EDITED': {
+      const { messageId, conversationId, newContent, editHistory, editedAt } = action;
+      const prev = state.messages[conversationId] ?? [];
+      return {
+        ...state,
+        messages: {
+          ...state.messages,
+          [conversationId]: prev.map(m =>
+            m.id === messageId
+              ? { ...m, content: newContent, edited_at: editedAt, edit_history: editHistory ?? [] }
+              : m
+          ),
+        },
+      };
+    }
+
     case 'CONVERSATION_DELETED': {
       const { conversationId } = action;
       const messages     = { ...state.messages };
@@ -152,6 +184,7 @@ function reducer(state, action) {
       };
     }
 
+    // Confirmação de visualização — atualiza ticks para azul
     case 'MESSAGES_READ': {
       const prev = state.messages[action.conversationId] ?? [];
       return {
@@ -261,10 +294,7 @@ function reducer(state, action) {
       };
 
     case 'CALL_REMOTE_STREAM':
-      return {
-        ...state,
-        call: { ...state.call, remoteStream: action.remoteStream },
-      };
+      return { ...state, call: { ...state.call, remoteStream: action.remoteStream } };
 
     case 'CALL_TOGGLE_MUTE':
       return { ...state, call: { ...state.call, isMuted: !state.call.isMuted } };
@@ -375,9 +405,20 @@ export function ChatProvider({ children }) {
         }
         dispatch({ type: 'SYNC_COMPLETE' });
         break;
+
       case 'conversation_ready':
         dispatch({ type: 'CONVERSATION_READY', ...data });
         break;
+
+      // Histórico carregado via get_history
+      case 'history':
+        dispatch({
+          type:           'HISTORY_LOADED',
+          conversationId: data.conversationId,
+          messages:       data.messages ?? [],
+        });
+        break;
+
       case 'group_created':
         dispatch({ type: 'GROUP_CREATED', conversation: data.conversation, participants: data.participants });
         break;
@@ -389,6 +430,16 @@ export function ChatProvider({ children }) {
         break;
       case 'message_deleted':
         dispatch({ type: 'MESSAGE_DELETED', messageId: data.messageId, conversationId: data.conversationId });
+        break;
+      case 'message_edited':
+        dispatch({
+          type:           'MESSAGE_EDITED',
+          messageId:      data.messageId,
+          conversationId: data.conversationId,
+          newContent:     data.newContent,
+          editHistory:    data.editHistory,
+          editedAt:       data.editedAt,
+        });
         break;
       case 'conversation_deleted':
         dispatch({ type: 'CONVERSATION_DELETED', conversationId: data.conversationId });
@@ -428,7 +479,6 @@ export function ChatProvider({ children }) {
 
       case 'call_offer': {
         const peer = data.fromUser ?? {};
-        // Guarda o SDP para o answerCall usar
         pcRef._pendingOffer = data.sdp;
         dispatch({
           type:           'CALL_INCOMING',
@@ -465,15 +515,12 @@ export function ChatProvider({ children }) {
         cleanupCall();
         alert('Usuário indisponível no momento.');
         break;
-
       case 'call_reject':
         cleanupCall();
         break;
-
       case 'call_end':
         cleanupCall();
         break;
-
       case 'call_busy':
         cleanupCall();
         alert('Usuário ocupado em outra chamada.');
@@ -493,7 +540,7 @@ export function ChatProvider({ children }) {
 
   const actions = {
 
-    // ── Originais ───────────────────────────────────────────────────────────
+    // ── Mensagens e conversas ────────────────────────────────────────────────
     auth:               (userId, name, avatarUrl)              => { localStorage.setItem('vibe_userId', userId); send('auth', { userId, name, avatarUrl }); },
     addContact:         (contactId, nickname)                  => send('add_contact',         { contactId, nickname }),
     addContactByName:   (name, nickname)                       => send('add_contact_by_name', { name, nickname }),
@@ -501,6 +548,7 @@ export function ChatProvider({ children }) {
     getContacts:        ()                                     => send('get_contacts'),
     openDirect:         (targetUserId)                         => send('open_direct',         { targetUserId }),
     sendMessage:        (conversationId, content, type='text') => send('send_message',        { conversationId, content, type }),
+    editMessage:        (messageId, newContent)                => send('edit_message',        { messageId, newContent }),
     markRead:           (conversationId)                       => send('message_read',        { conversationId }),
     setTyping:          (conversationId, isTyping)             => send('typing',              { conversationId, isTyping }),
     createGroup:        (name, memberIds)                      => send('create_group',        { name, memberIds }),
@@ -513,6 +561,12 @@ export function ChatProvider({ children }) {
     dismissSync:        ()                                     => dispatch({ type: 'DISMISS_SYNC' }),
     setActive:          (convId)                               => dispatch({ type: 'SET_ACTIVE', convId }),
 
+    // Carrega histórico de conversa existente
+    // Útil quando o usuário abre uma conversa que já existia
+    // mas ainda não tem mensagens carregadas na sessão atual
+    getHistory: (conversationId, limit = 50) =>
+      send('get_history', { conversationId, limit }),
+
     // ── Chamadas ─────────────────────────────────────────────────────────────
 
     startCall: async (conversationId, peerId, callType = 'audio') => {
@@ -522,13 +576,10 @@ export function ChatProvider({ children }) {
           video: callType === 'video',
         });
         localStreamRef.current = stream;
-
         const pc = createPC(peerId);
         stream.getTracks().forEach(track => pc.addTrack(track, stream));
-
         const offer = await pc.createOffer();
         await pc.setLocalDescription(offer);
-
         const peer = state.users[peerId] ?? {};
         dispatch({
           type:           'CALL_OUTGOING',
@@ -539,9 +590,7 @@ export function ChatProvider({ children }) {
           peerAvatar:     peer.avatar_url ?? null,
           localStream:    stream,
         });
-
         send('call_offer', { to: peerId, conversationId, callType, sdp: offer.sdp });
-
       } catch (err) {
         console.error('[WebRTC] startCall:', err);
         cleanupCall();
@@ -559,28 +608,20 @@ export function ChatProvider({ children }) {
       const { peerId, type: callType } = state.call;
       const pendingSdp = pcRef._pendingOffer;
       if (!peerId || !pendingSdp) return;
-
       try {
         const stream = await navigator.mediaDevices.getUserMedia({
           audio: true,
           video: callType === 'video',
         });
         localStreamRef.current = stream;
-
         const pc = createPC(peerId);
         stream.getTracks().forEach(track => pc.addTrack(track, stream));
-
         await pc.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp: pendingSdp }));
-
         const answer = await pc.createAnswer();
         await pc.setLocalDescription(answer);
-
         dispatch({ type: 'CALL_CONNECTED', localStream: stream });
-
         send('call_answer', { to: peerId, sdp: answer.sdp });
-
         pcRef._pendingOffer = null;
-
       } catch (err) {
         console.error('[WebRTC] answerCall:', err);
         cleanupCall();
@@ -622,38 +663,23 @@ export function ChatProvider({ children }) {
       dispatch({ type: 'CALL_TOGGLE_CAMERA' });
     },
 
-    // Troca câmera frontal ↔ traseira (mobile)
-    // Recebe localVideoRef do useWebRTC para atualizar o preview
     switchCamera: async (localVideoRef) => {
       const stream = localStreamRef.current;
       const pc     = pcRef.current;
       if (!stream || !pc) return;
-
       const currentTrack  = stream.getVideoTracks()[0];
       if (!currentTrack) return;
-
       const currentFacing = currentTrack.getSettings().facingMode ?? 'user';
       const nextFacing    = currentFacing === 'user' ? 'environment' : 'user';
-
       try {
-        const newStream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: nextFacing },
-        });
-        const newTrack = newStream.getVideoTracks()[0];
-
-        // Substitui track no PeerConnection sem renegociação
-        const sender = pc.getSenders().find(s => s.track?.kind === 'video');
+        const newStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: nextFacing } });
+        const newTrack  = newStream.getVideoTracks()[0];
+        const sender    = pc.getSenders().find(s => s.track?.kind === 'video');
         if (sender) await sender.replaceTrack(newTrack);
-
-        // Substitui no stream local
         stream.removeTrack(currentTrack);
         currentTrack.stop();
         stream.addTrack(newTrack);
-
-        // Atualiza preview via ref
-        if (localVideoRef?.current) {
-          localVideoRef.current.srcObject = stream;
-        }
+        if (localVideoRef?.current) localVideoRef.current.srcObject = stream;
       } catch (err) {
         console.error('[WebRTC] switchCamera:', err);
       }

@@ -92,9 +92,13 @@ async function createSchema() {
       PRIMARY KEY (conversation_id, user_id)
     );
 
-    -- Adiciona colunas de criptografia se ainda não existirem
-    ALTER TABLE users ADD COLUMN IF NOT EXISTS public_key         TEXT;
-    ALTER TABLE users ADD COLUMN IF NOT EXISTS private_key_escrow TEXT;
+    -- Colunas de criptografia (safe em bancos antigos)
+    ALTER TABLE users    ADD COLUMN IF NOT EXISTS public_key         TEXT;
+    ALTER TABLE users    ADD COLUMN IF NOT EXISTS private_key_escrow TEXT;
+
+    -- Colunas de edição de mensagens (safe em bancos antigos)
+    ALTER TABLE messages ADD COLUMN IF NOT EXISTS edited_at    TIMESTAMPTZ;
+    ALTER TABLE messages ADD COLUMN IF NOT EXISTS edit_history JSONB DEFAULT '[]';
 
     CREATE INDEX IF NOT EXISTS idx_messages_conv     ON messages(conversation_id, created_at);
     CREATE INDEX IF NOT EXISTS idx_queue_user        ON offline_queue(user_id);
@@ -158,7 +162,10 @@ const db = {
     },
 
     async setStatus(id, status) {
-      await query('UPDATE users SET status = $1, last_seen = NOW() WHERE id = $2', [status, id]);
+      await query(
+        'UPDATE users SET status = $1, last_seen = NOW() WHERE id = $2',
+        [status, id]
+      );
     },
 
     async updateProfile(id, { name, avatarUrl, bio, phone }) {
@@ -175,9 +182,10 @@ const db = {
     },
 
     async saveKeys(userId, publicKey, privateKeyEscrow) {
-      await query(`
-        UPDATE users SET public_key = $2, private_key_escrow = $3 WHERE id = $1
-      `, [userId, publicKey, privateKeyEscrow]);
+      await query(
+        'UPDATE users SET public_key = $2, private_key_escrow = $3 WHERE id = $1',
+        [userId, publicKey, privateKeyEscrow]
+      );
     },
 
     async getPublicKey(userId) {
@@ -210,7 +218,10 @@ const db = {
     },
 
     async remove(ownerId, contactId) {
-      await query('DELETE FROM contacts WHERE owner_id = $1 AND contact_id = $2', [ownerId, contactId]);
+      await query(
+        'DELETE FROM contacts WHERE owner_id = $1 AND contact_id = $2',
+        [ownerId, contactId]
+      );
     },
 
     async list(ownerId) {
@@ -307,7 +318,8 @@ const db = {
 
     async list(convId) {
       const res = await query(
-        'SELECT user_id FROM participants WHERE conversation_id = $1', [convId]
+        'SELECT user_id FROM participants WHERE conversation_id = $1',
+        [convId]
       );
       return res.rows.map(r => r.user_id);
     },
@@ -357,7 +369,10 @@ const db = {
     },
 
     async updateStatus(messageId, status) {
-      await query('UPDATE messages SET status = $1 WHERE id = $2', [status, messageId]);
+      await query(
+        'UPDATE messages SET status = $1 WHERE id = $2',
+        [status, messageId]
+      );
     },
 
     async markConversationRead(convId, byUserId) {
@@ -379,6 +394,37 @@ const db = {
     async deleteForAll(messageId) {
       await query('DELETE FROM messages WHERE id = $1', [messageId]);
     },
+
+    // ── NOVO: editar mensagem ───────────────────────────────────────────────
+    // Guarda o conteúdo anterior no edit_history (array JSONB) antes de salvar
+    // o novo conteúdo. Retorna a mensagem atualizada completa.
+    async edit(messageId, newContent) {
+      // Busca conteúdo atual para guardar no histórico
+      const current = await query(
+        'SELECT content, edit_history FROM messages WHERE id = $1',
+        [messageId]
+      );
+      const row = current.rows[0];
+      if (!row) return null;
+
+      // Histórico atual (array) + versão que está sendo substituída agora
+      const previousHistory = Array.isArray(row.edit_history) ? row.edit_history : [];
+      const updatedHistory  = [
+        ...previousHistory,
+        { text: row.content, edited_at: new Date().toISOString() },
+      ];
+
+      const res = await query(`
+        UPDATE messages
+        SET content      = $1,
+            edited_at    = NOW(),
+            edit_history = $2::jsonb
+        WHERE id = $3
+        RETURNING *
+      `, [newContent, JSON.stringify(updatedHistory), messageId]);
+
+      return res.rows[0] ?? null;
+    },
   },
 
   offlineQueue: {
@@ -389,6 +435,7 @@ const db = {
         INSERT INTO offline_queue (id, user_id, event_type, payload, expires_at)
         VALUES ($1,$2,$3,$4,$5)
       `, [id, userId, eventType, JSON.stringify(payload), expires]);
+      // Mantém máximo 100 mensagens por usuário na fila
       await query(`
         DELETE FROM offline_queue
         WHERE user_id = $1 AND id NOT IN (
@@ -402,7 +449,8 @@ const db = {
 
     async flush(userId) {
       const res = await query(
-        'SELECT * FROM offline_queue WHERE user_id = $1 ORDER BY created_at', [userId]
+        'SELECT * FROM offline_queue WHERE user_id = $1 ORDER BY created_at',
+        [userId]
       );
       await query('DELETE FROM offline_queue WHERE user_id = $1', [userId]);
       return res.rows.map(r => ({ ...r, payload: JSON.parse(r.payload) }));

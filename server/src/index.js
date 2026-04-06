@@ -312,7 +312,7 @@ setInterval(async () => {
 const PORT = process.env.PORT || 3001;
 
 db.createSchema().then(() => {
-  server.listen(PORT, () => {
+    server.listen(PORT, '0.0.0.0', () => {
     console.log(`\n⚡ Vibe Server`);
     console.log(`   WS   → ws://localhost:${PORT}`);
     console.log(`   REST → http://localhost:${PORT}/api/status`);

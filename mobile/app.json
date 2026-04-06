@@ -12,22 +12,62 @@
       "resizeMode": "contain",
       "backgroundColor": "#0d0d14"
     },
+
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "bundleIdentifier": "com.vibe.app",
+      "infoPlist": {
+        "NSMicrophoneUsageDescription": "O Vibe precisa do microfone para gravar mensagens de voz e realizar chamadas de áudio.",
+        "NSCameraUsageDescription": "O Vibe precisa da câmera para realizar chamadas de vídeo.",
+        "NSPhotoLibraryUsageDescription": "O Vibe precisa acessar suas fotos para enviar imagens."
+      }
     },
+
     "android": {
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#0d0d14"
       },
-      "edgeToEdgeEnabled": true
+      "edgeToEdgeEnabled": true,
+      "package": "com.vibe.app",
+      "usesCleartextTraffic": true,
+      "permissions": [
+        "android.permission.RECORD_AUDIO",
+        "android.permission.CAMERA",
+        "android.permission.MODIFY_AUDIO_SETTINGS",
+        "android.permission.ACCESS_NETWORK_STATE",
+        "android.permission.BLUETOOTH",
+        "android.permission.BLUETOOTH_CONNECT",
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.WRITE_EXTERNAL_STORAGE",
+        "android.permission.INTERNET",
+        "android.permission.READ_CONTACTS",
+        "android.permission.WRITE_CONTACTS"
+      ]
     },
+
     "web": {
       "favicon": "./assets/favicon.png"
     },
+
     "plugins": [
       "expo-secure-store",
-      "expo-contacts"
-    ]
+      "expo-contacts",
+      "expo-av",
+      "expo-camera",
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "O Vibe precisa acessar suas fotos para enviar imagens.",
+          "cameraPermission": "O Vibe precisa da câmera para tirar fotos."
+        }
+      ]
+    ],
+
+    "extra": {
+      "eas": {
+        "projectId": "435ba7e2-9992-4346-8f2a-b687bbfb6400"
+      }
+    }
   }
 }
