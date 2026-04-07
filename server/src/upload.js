@@ -63,8 +63,8 @@ const upload = multer({
 
 async function uploadToCloud(filePath, mimetype) {
   const resourceType = mimetype.startsWith('image/') ? 'image'
-                     : mimetype.startsWith('video/') ? 'video'
-                     : 'raw'; // audio vai como raw
+                   : mimetype.startsWith('video/') ? 'video'
+                   : 'video'; // audio também vai como video no Cloudinary
 
   try {
     const result = await cloudinary.uploader.upload(filePath, {
