@@ -1,32 +1,47 @@
 'use strict';
 
-const multer = require('multer');
-const path   = require('path');
-const fs     = require('fs');
+const multer     = require('multer');
+const path       = require('path');
+const fs         = require('fs');
+const cloudinary = require('cloudinary').v2;
 
-// Garante que a pasta existe
+// ── Configura Cloudinary ──────────────────────────────────────────────────────
+
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME ?? 'du2lsurb1',
+  api_key:    process.env.CLOUDINARY_API_KEY    ?? '881134422677227',
+  api_secret: process.env.CLOUDINARY_API_SECRET ?? '_KVw7rUuPQHMc2hFqQ-0_d37li4',
+});
+
+// ── Pasta temporária local (para o multer salvar antes de enviar) ─────────────
+
 const UPLOAD_DIR = path.join(__dirname, '../../uploads');
 if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 
-// Tipos permitidos
+// ── Tipos permitidos ──────────────────────────────────────────────────────────
+
 const ALLOWED = {
-  'image/jpeg':  'img',
-  'image/png':   'img',
-  'image/gif':   'img',
-  'image/webp':  'img',
-  'audio/mpeg':  'audio',
-  'audio/ogg':   'audio',
-  'audio/wav':   'audio',
-  'audio/webm':  'audio',
-  'video/mp4':   'video',
-  'video/webm':  'video',
-  'video/ogg':   'video',
+  'image/jpeg': 'image',
+  'image/png':  'image',
+  'image/gif':  'image',
+  'image/webp': 'image',
+  'audio/mpeg': 'audio',
+  'audio/ogg':  'audio',
+  'audio/wav':  'audio',
+  'audio/webm': 'audio',
+  'audio/m4a':  'audio',
+  'audio/mp4':  'audio',
+  'video/mp4':  'video',
+  'video/webm': 'video',
+  'video/ogg':  'video',
 };
+
+// ── Multer — salva temporariamente em disco ───────────────────────────────────
 
 const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, UPLOAD_DIR),
   filename:    (req, file, cb) => {
-    const ext  = path.extname(file.originalname).toLowerCase();
+    const ext  = path.extname(file.originalname).toLowerCase() || '.bin';
     const name = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}${ext}`;
     cb(null, name);
   },
@@ -40,9 +55,32 @@ const fileFilter = (req, file, cb) => {
 const upload = multer({
   storage,
   fileFilter,
-  limits: {
-    fileSize: 100 * 1024 * 1024, // 100 MB
-  },
+  limits: { fileSize: 100 * 1024 * 1024 }, // 100 MB
 });
 
-module.exports = { upload, UPLOAD_DIR, ALLOWED };
+// ── Envia arquivo para Cloudinary e remove o temp ─────────────────────────────
+// Retorna a URL pública do Cloudinary
+
+async function uploadToCloud(filePath, mimetype) {
+  const resourceType = mimetype.startsWith('image/') ? 'image'
+                     : mimetype.startsWith('video/') ? 'video'
+                     : 'raw'; // audio vai como raw
+
+  try {
+    const result = await cloudinary.uploader.upload(filePath, {
+      resource_type: resourceType,
+      folder:        'vibe',
+    });
+
+    // Remove arquivo temporário
+    fs.unlink(filePath, () => {});
+
+    return result.secure_url;
+  } catch (err) {
+    // Remove arquivo temporário mesmo em caso de erro
+    fs.unlink(filePath, () => {});
+    throw err;
+  }
+}
+
+module.exports = { upload, uploadToCloud, UPLOAD_DIR, ALLOWED };

@@ -13,7 +13,7 @@ const bcrypt       = require('bcrypt');
 const jwt          = require('jsonwebtoken');
 const db           = require('./db/db_index');
 const handlers     = require('./handlers/handlers_index');
-const { upload, UPLOAD_DIR } = require('./upload');
+const { upload, uploadToCloud, UPLOAD_DIR } = require('./upload');
 const { socketMap, addSocket, removeSocket, countSockets, socketSend } = require('./middleware/socketMap');
 
 const app    = express();
@@ -122,13 +122,18 @@ app.post('/auth/profile', async (req, res) => {
 
 // ── Upload ────────────────────────────────────────────────────────────────────
 
-app.post('/api/upload', upload.single('file'), (req, res) => {
+app.post('/api/upload', upload.single('file'), async (req, res) => {
   if (!req.file) return res.status(400).json({ ok: false, error: 'Nenhum arquivo enviado' });
-  const url  = `http://${req.hostname}:${process.env.PORT || 3001}/uploads/${req.file.filename}`;
-  const type = req.file.mimetype.startsWith('image/') ? 'image'
-             : req.file.mimetype.startsWith('audio/') ? 'audio' : 'video';
-  console.log(`[UPLOAD] ${type} → ${req.file.filename} (${(req.file.size / 1024).toFixed(1)} KB)`);
-  res.json({ ok: true, url, type, filename: req.file.filename, size: req.file.size });
+  try {
+    const url  = await uploadToCloud(req.file.path, req.file.mimetype);
+    const type = req.file.mimetype.startsWith('image/') ? 'image'
+               : req.file.mimetype.startsWith('audio/') ? 'audio' : 'video';
+    console.log(`[UPLOAD] ${type} → Cloudinary (${(req.file.size / 1024).toFixed(1)} KB)`);
+    res.json({ ok: true, url, type, size: req.file.size });
+  } catch (err) {
+    console.error('[UPLOAD] Cloudinary erro:', err.message);
+    res.status(500).json({ ok: false, error: 'Erro ao enviar arquivo' });
+  }
 });
 
 // ── Sticker — remove fundo com rembg ─────────────────────────────────────────
