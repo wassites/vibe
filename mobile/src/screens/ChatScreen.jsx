@@ -10,7 +10,8 @@ import {
 import { Audio } from 'expo-av';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useChat } from '../context/ChatContext';
-import InputBar from '../components/InputBar';
+import InputBar     from '../components/InputBar';
+import { useWebRTC } from '../hooks/useWebRTC';
 
 // ── Extrai texto legível de mensagens cifradas ────────────────────────────────
 
@@ -185,6 +186,7 @@ function Bubble({ msg, isOwn, onLongPress }) {
 export default function ChatScreen({ route, navigation }) {
   const { conversationId, title, peerId } = route.params;
   const { state, actions } = useChat();
+  const { startCall }      = useWebRTC();
   const insets = useSafeAreaInsets();
 
   const flatRef = useRef(null);
@@ -299,10 +301,10 @@ export default function ChatScreen({ route, navigation }) {
         {peerId && (
           <View style={s.callBtns}>
             <CallButton icon="📞" onPress={() =>
-              Alert.alert('Em breve', 'Chamadas chegam no próximo update!')
+              startCall(conversationId, peerId, 'audio')
             }/>
             <CallButton icon="📹" onPress={() =>
-              Alert.alert('Em breve', 'Chamadas de vídeo chegam no próximo update!')
+              startCall(conversationId, peerId, 'video')
             }/>
           </View>
         )}
