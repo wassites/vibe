@@ -79,7 +79,7 @@ export function useWebRTC() {
     pc.onicecandidate = ({ candidate }) => {
       if (candidate) {
         actions.sendCallSignal?.('call_ice', peerId, { candidate })
-          ?? actions.send?.('call_ice', { to: peerId, candidate });
+          
       }
     };
 
@@ -155,7 +155,7 @@ export function useWebRTC() {
 
       // Notifica o ChatContext para atualizar o estado de chamada
       const peer = state.users[peerId] ?? {};
-      actions.dispatch?.({ type: 'CALL_OUTGOING',
+      actions.dispatchCall?.({ type: 'CALL_OUTGOING',
         callType, conversationId, peerId,
         peerName:   peer.name       ?? 'Desconhecido',
         peerAvatar: peer.avatar_url ?? null,
@@ -163,8 +163,8 @@ export function useWebRTC() {
       });
 
       // Envia offer pelo socket
-      actions.sendCallIOS?.('call_offer', peerId, { conversationId, callType, sdp: offer.sdp })
-        ?? actions.send?.('call_offer', { to: peerId, conversationId, callType, sdp: offer.sdp });
+      actions.sendCallSignal?.('call_offer', peerId, { conversationId, callType, sdp: offer.sdp })
+        
 
     } catch (err) {
       console.error('[WebRTC] startCall:', err);
@@ -198,7 +198,7 @@ export function useWebRTC() {
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
 
-      actions.send?.('call_answer', { to: peerId, sdp: answer.sdp });
+      actions.sendCallSignal?.('call_answer', peerId, { sdp: answer.sdp });
       pcRef._pendingOffer = null;
 
     } catch (err) {
@@ -240,7 +240,7 @@ export function useWebRTC() {
   // Recusa chamada
   const rejectCall = useCallback(() => {
     const { peerId } = call;
-    if (peerId) actions.send?.('call_reject', { to: peerId });
+    if (peerId) actions.sendCallSignal?.('call_reject', peerId, {});
     _stopLocalStream();
     _closePC();
   }, [call, actions]);
@@ -248,7 +248,7 @@ export function useWebRTC() {
   // Encerra chamada
   const hangup = useCallback(() => {
     const { peerId } = call;
-    if (peerId) actions.send?.('call_end', { to: peerId });
+    if (peerId) actions.sendCallSignal?.('call_end', peerId, {});
     _stopLocalStream();
     _closePC();
   }, [call, actions]);
