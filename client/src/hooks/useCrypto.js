@@ -1,6 +1,7 @@
 // client/src/hooks/useCrypto.js
 
-const API = `http://${window.location.hostname}:3001`;
+import { API_URL } from "../lib/api";
+const API = API_URL;
 
 // ── Helpers Web Crypto API ────────────────────────────────────────────────────
 
